@@ -1,0 +1,132 @@
+# HelmRelease values verified against nextcloud chart 9.2.6 (appVersion 34.0.3)
+# values.yaml — https://github.com/nextcloud/helm — deps (mariadb/redis) vendored
+# into the published tgz, so Flux can render it without fetching OCI deps.
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: nextcloud
+  namespace: nextcloud
+spec:
+  interval: 30m
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+  chart:
+    spec:
+      chart: nextcloud
+      version: "9.2.6" # pinned; Renovate opens PRs
+      sourceRef:
+        kind: HelmRepository
+        name: nextcloud
+        namespace: flux-system
+  values:
+    # nginx + php-fpm: the chart requires the fpm image flavor when
+    # nginx.enabled is true (apache flavor ships no php-fpm).
+    image:
+      flavor: fpm
+
+    nextcloud:
+      host: cloud.victorklomp.nl
+      existingSecret:
+        enabled: true
+        secretName: nextcloud-admin
+        usernameKey: admin-username
+        passwordKey: admin-password
+      configs:
+        custom.config.php: |
+          <?php
+          $CONFIG = array (
+            // Pod CIDR of this single-node k3s: Traefik -> nginx hops are
+            // seen from 10.42.0.0/16. Kept in sync so Nextcloud trusts
+            // X-Forwarded-* from Traefik only.
+            'trusted_proxies' => array('10.42.0.0/16'),
+            'overwritehost' => 'cloud.victorklomp.nl',
+            'overwrite.cli.url' => 'https://cloud.victorklomp.nl',
+            'overwriteprotocol' => 'https',
+            'maintenance_window_start' => 1,
+          );
+      phpConfigs:
+        php.ini: |
+          memory_limit = 512M
+          upload_max_filesize = 10G
+          post_max_size = 10G
+
+    nginx:
+      enabled: true
+      config:
+        # Replaces the chart default (512M) so nginx matches the PHP limits.
+        # Injected into the generated server block (nextcloud docs config).
+        serverBlockCustom: |
+          client_max_body_size 10G;
+          client_body_timeout 300s;
+          fastcgi_buffers 64 4K;
+          fastcgi_read_timeout 3600s;
+
+    # Background jobs via the dedicated cron container (crond sidecar).
+    cronjob:
+      enabled: true
+      type: sidecar
+
+    internalDatabase:
+      enabled: false
+
+    # With mariadb.enabled the chart reads MYSQL_USER / MYSQL_PASSWORD from the
+    # secret named here (chart default would be a never-created "<release>-db"
+    # secret). One secret (nextcloud-mariadb) serves both the bitnami subchart
+    # and the app container.
+    externalDatabase:
+      existingSecret:
+        secretName: nextcloud-mariadb
+        usernameKey: db-username
+        passwordKey: mariadb-password
+
+    mariadb:
+      enabled: true
+      auth:
+        # Keys required by the vendored bitnami chart: mariadb-root-password,
+        # mariadb-replication-password, mariadb-password (all three present in
+        # secrets.sops.yaml).
+        existingSecret: nextcloud-mariadb
+      primary:
+        persistence:
+          enabled: true
+          storageClass: local-path
+          size: 8Gi
+
+    redis:
+      enabled: true
+      # Vendored bitnami chart defaults to replication (master + 3 replicas)
+      # — pointless on a single node. One master, cache only.
+      architecture: standalone
+      auth:
+        existingSecret: nextcloud-redis
+        existingSecretPasswordKey: redis-password
+
+    # Single PVC for html + data (~50GB used of 150Gi), local NVMe.
+    persistence:
+      enabled: true
+      storageClass: local-path
+      size: 150Gi
+
+    ingress:
+      enabled: true
+      className: traefik
+      annotations:
+        cert-manager.io/cluster-issuer: letsencrypt-prod
+      tls:
+        - secretName: nextcloud-tls
+          hosts:
+            - cloud.victorklomp.nl
+
+    # App container resources (chart key is top-level `resources`, NOT
+    # nextcloud.resources).
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: "2"
+        memory: 2Gi

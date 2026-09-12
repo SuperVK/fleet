@@ -1,0 +1,60 @@
+# One-shot OneDrive -> Nextcloud data import (template).
+#
+# Committed suspended so Flux applies it but never runs it. To use:
+#   1. Edit CHANGE_ME_USER below (the Nextcloud username that owns the files)
+#      and the onedrive: source path, commit, wait for Flux to reconcile.
+#   2. Run it:
+#        kubectl patch -n nextcloud job onedrive-import \
+#          -p '{"spec":{"suspend":false}}'
+#   3. Watch: kubectl logs -n nextcloud job/onedrive-import -f
+#
+# NOTE the target path: the chart mounts the PVC with subPaths, so the PVC
+# root holds html/ data/ config/ ... and the Nextcloud data dir is
+# <PVC>/data/<user>/files — hence /data/data/<user>/files/Photos.
+# The job runs as uid 33 (www-data), so files land correctly owned and no
+# chown step is needed.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: onedrive-import
+  namespace: nextcloud
+spec:
+  suspend: true
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsUser: 33
+        runAsGroup: 33
+        fsGroup: 33
+      containers:
+        - name: rclone
+          image: rclone/rclone:1.75.1 # pinned; Renovate bumps
+          env:
+            - name: RCLONE_CONFIG
+              value: /config/rclone/rclone.conf
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              rclone copy onedrive:Photos /data/data/CHANGE_ME_USER/files/Photos \
+                --include "*.{jpg,jpeg,png,heic,heif,webp}" \
+                --transfers 4 --checkers 8 --tpslimit 8 \
+                --retries 5 --retries-sleep 30s \
+                --log-level INFO
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: rclone-conf
+              mountPath: /config/rclone
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            # fullname("nextcloud") + "-nextcloud" — verified against chart 9.2.6
+            # templates/nextcloud-pvc.yaml
+            claimName: nextcloud-nextcloud
+        - name: rclone-conf
+          secret:
+            secretName: rclone-config

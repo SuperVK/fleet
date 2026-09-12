@@ -1,0 +1,17 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":dependencyDashboard", ":semanticCommits"],
+  "flux": {
+    "fileMatch": ["clusters/.+\\.ya?ml$", "apps/.+\\.ya?ml$", "infrastructure/.+\\.ya?ml$"]
+  },
+  "helm-values": {
+    "fileMatch": ["(apps|infrastructure)/.+/values\\.ya?ml$"]
+  },
+  "docker": {
+    "fileMatch": ["apps/.+\\.ya?ml$"]
+  },
+  "packageRules": [
+    { "matchDatasources": ["helm"], "groupName": "helm charts" },
+    { "matchDatasources": ["docker"], "groupName": "container images" }
+  ]
+}

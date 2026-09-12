@@ -1,0 +1,5 @@
+creation_rules:
+  - path_regex: .*\.sops\.ya?ml$
+    encrypted_regex: "^(data|stringData)$"
+    # Replace with your public age key (see README §Bootstrap), e.g. age1xxxxx...
+    age: age194e8gmr9ctdzp2h3jzfel03xgx9e9rses3cncskr2r5qnpykyadqzuva8c

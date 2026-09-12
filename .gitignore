@@ -1,0 +1,8 @@
+# Private age key material — never commit
+*.agekey
+age.agekey
+keys.txt
+
+# Locally decrypted secrets
+decrypted-*
+*.decrypted.yaml
