@@ -182,7 +182,21 @@ flux resume  helmrelease -n home-assistant home-assistant
 Home Assistant day-2: config lives in its PVC (`/config`), not in git — edit
 via the UI or `kubectl exec -it -n home-assistant pod/home-assistant-0 -- bash`
 and change files directly (then delete the pod to restart). StatefulSet, so
-the pod is `home-assistant-0` and chart upgrades recreate it in place.
+the pod is `home-assistant-0` and chart upgrades recreate it in place. Logs:
+`kubectl logs -n home-assistant home-assistant-0 -f` (init container:
+`-c setup-config`; HA's own log file is `/config/home-assistant.log`).
+
+**Restoring a backup wipes the reverse-proxy trust.** An imported backup
+replaces `/config/.storage/http` with the source instance's settings, so
+`trusted_proxies` no longer covers the pod CIDR and every request through
+Traefik gets `400` (log: `Received X-Forwarded-For header from an untrusted
+proxy`). Fix after every restore:
+
+```bash
+kubectl --kubeconfig ~/.kube/fleet.yaml --insecure-skip-tls-verify exec -n home-assistant home-assistant-0 -- \
+  python3 -c 'import json; p="/config/.storage/http"; d=json.load(open(p)); [d["data"][s].update(trusted_proxies=["10.42.0.0/16"]) for s in ("stable","pending") if d["data"].get(s)]; json.dump(d,open(p,"w"),indent=2)'
+kubectl --kubeconfig ~/.kube/fleet.yaml --insecure-skip-tls-verify delete pod -n home-assistant home-assistant-0
+```
 
 Upgrades: Renovate pins `nextcloud 9.2.6` / `home-assistant 0.3.80` /
 `cert-manager v1.21.2` / `rclone/rclone:1.75.1` and opens PRs; merge when
