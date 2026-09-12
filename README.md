@@ -27,8 +27,8 @@ GitOps: github.com/SuperVK/fleet ──► Flux ──► cluster
 ```
 .sops.yaml                          # SOPS creation rules (age) — insert your public key
 renovate.json                       # Renovate: pin + bump charts/images
-clusters/prod/                      # Flux: infrastructure.yaml, apps.yaml (flux bootstrap adds flux-system/)
-infrastructure/                     # HelmRepositories, cert-manager (HelmRelease + ClusterIssuer)
+clusters/prod/                      # Flux: infrastructure.yaml, issuers.yaml, apps.yaml (flux bootstrap adds flux-system/)
+infrastructure/                     # HelmRepositories, cert-manager (HelmRelease), issuers/ (ClusterIssuer)
 apps/nextcloud/                     # namespace, HelmRelease, SOPS secrets, import Job (suspended)
 ```
 
@@ -129,9 +129,13 @@ kubectl get pods -n nextcloud       # nextcloud, mariadb, redis Running
 curl -I https://cloud.victorklomp.nl/status.php   # 200
 ```
 
-First reconcile takes a few minutes: the `ClusterIssuer` manifest is applied
-before cert-manager's CRDs exist, so Flux retries (1m interval) until the Helm
-install finishes — that retry loop is expected exactly once on a fresh cluster.
+First reconcile takes a few minutes and happens in strict order:
+`infrastructure` (installs cert-manager + its CRDs) → `issuers` (the
+ClusterIssuer, which dry-run-fails until those CRDs exist — that's why it is a
+separate Kustomization with `dependsOn`) → `apps` (Nextcloud). Co-locating the
+ClusterIssuer with the HelmRelease deadlocks: one dry-run failure aborts the
+whole Kustomization apply, so the HelmRelease that provides the CRDs never
+lands.
 
 Log in as `admin` with `admin-password` from your SOPS secret. Admin →
 Administration settings → Basic settings should show **no** setup warnings:

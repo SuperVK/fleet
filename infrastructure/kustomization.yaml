@@ -5,4 +5,3 @@ resources:
   - sources/jetstack.yaml
   - cert-manager/namespace.yaml
   - cert-manager/helmrelease.yaml
-  - cert-manager/clusterissuer.yaml
