@@ -1,10 +1,10 @@
-# fleet — Nextcloud on single-node k3s + Flux CD (GitOps)
+# fleet — Nextcloud + Home Assistant on single-node k3s + Flux CD (GitOps)
 
-Personal Nextcloud on a Hetzner VPS (Debian 13, CPX31-class), single-node k3s,
-reconciled end-to-end by Flux CD from this repository.
+Personal Nextcloud and Home Assistant on a Hetzner VPS (Debian 13, CPX31-class),
+single-node k3s, reconciled end-to-end by Flux CD from this repository.
 
-- **Domain:** `cloud.victorklomp.nl` (Let's Encrypt via cert-manager, HTTP-01 through Traefik)
-- **Chart pins:** nextcloud **9.2.6** (app 34.0.3), cert-manager **v1.21.2** — Renovate opens PRs for bumps
+- **Domains:** `cloud.victorklomp.nl` (Nextcloud), `ha.victorklomp.nl` (Home Assistant) — Let's Encrypt via cert-manager, HTTP-01 through Traefik
+- **Chart pins:** nextcloud **9.2.6** (app 34.0.3), home-assistant **0.3.80** (app 2026.9.1), cert-manager **v1.21.2** — Renovate opens PRs for bumps
 - **Storage:** `local-path` (single node, no replicated storage)
 - **Secrets:** SOPS + age only, decrypted in-cluster by Flux; nothing plaintext in git
 - **Backups:** handled **outside this repo** by the operator (explicitly out of scope — see §Restore for what must be covered)
@@ -13,11 +13,12 @@ reconciled end-to-end by Flux CD from this repository.
 ```
 Internet ──443──► Traefik (k3s bundled, LoadBalancer)
                     │  cert-manager / Let's Encrypt (HTTP-01)
-                    ▼
-                 Nextcloud (fpm image + nginx sidecar + cron sidecar)
-                    ├── MariaDB (ClusterIP, local-path PVC 8Gi)
-                    ├── Redis   (ClusterIP, cache only)
-                    └── PVC nextcloud-nextcloud (local-path, 150Gi)
+                    ├─► Nextcloud (fpm image + nginx sidecar + cron sidecar)
+                    │     ├── MariaDB (ClusterIP, local-path PVC 8Gi)
+                    │     ├── Redis   (ClusterIP, cache only)
+                    │     └── PVC nextcloud-nextcloud (local-path, 150Gi)
+                    └─► Home Assistant (ClusterIP; no DB, SQLite in its PVC)
+                          └── PVC home-assistant-home-assistant-0 (local-path, 8Gi)
 Admin ──Tailscale──► k3s API (6443, never public)
 GitOps: github.com/SuperVK/fleet ──► Flux ──► cluster
 ```
@@ -30,6 +31,7 @@ renovate.json                       # Renovate: pin + bump charts/images
 clusters/prod/                      # Flux: infrastructure.yaml, issuers.yaml, apps.yaml (flux bootstrap adds flux-system/)
 infrastructure/                     # HelmRepositories, cert-manager (HelmRelease), issuers/ (ClusterIssuer)
 apps/nextcloud/                     # namespace, HelmRelease, SOPS secrets, import Job (suspended)
+apps/home-assistant/                # namespace, HelmRelease (no secrets needed — onboarding user is created in the UI)
 ```
 
 ## Bootstrap (once)
@@ -41,7 +43,7 @@ push**, because `apps/nextcloud/kustomization.yaml` references
 ### 0. Prerequisites
 
 - Hetzner VPS (CPX31-class, Debian 13), SSH key only — done from the console.
-- DNS: `A` record `cloud.victorklomp.nl` → VPS IPv4 (and `AAAA` if you want v6).
+- DNS: `A` records `cloud.victorklomp.nl` and `ha.victorklomp.nl` → VPS IPv4 (and `AAAA` if you want v6).
 - On your workstation: `flux`, `kubectl`, `sops`, `age` (e.g. via brew/apk/apt).
 - `git init -b main .` in this directory, and create the empty repo
   `SuperVK/fleet` on GitHub (no README/license — keep it empty).
@@ -124,22 +126,28 @@ kubectl create secret generic sops-age -n flux-system \
 ```bash
 flux get kustomizations -A          # all Ready=True
 kubectl get pods -n cert-manager    # 3 Running
-kubectl get certificate -A          # nextcloud-tls Ready=True
+kubectl get certificate -A          # nextcloud-tls, home-assistant-tls Ready=True
 kubectl get pods -n nextcloud       # nextcloud, mariadb, redis Running
+kubectl get pods -n home-assistant  # home-assistant-0 Running
 curl -I https://cloud.victorklomp.nl/status.php   # 200
+curl -I https://ha.victorklomp.nl                 # 200
 ```
 
 First reconcile takes a few minutes and happens in strict order:
 `infrastructure` (installs cert-manager + its CRDs) → `issuers` (the
 ClusterIssuer, which dry-run-fails until those CRDs exist — that's why it is a
-separate Kustomization with `dependsOn`) → `apps` (Nextcloud). Co-locating the
-ClusterIssuer with the HelmRelease deadlocks: one dry-run failure aborts the
-whole Kustomization apply, so the HelmRelease that provides the CRDs never
-lands.
+separate Kustomization with `dependsOn`) → `apps` (Nextcloud, Home Assistant).
+Co-locating the ClusterIssuer with the HelmRelease deadlocks: one dry-run
+failure aborts the whole Kustomization apply, so the HelmRelease that provides
+the CRDs never lands.
 
-Log in as `admin` with `admin-password` from your SOPS secret. Admin →
-Administration settings → Basic settings should show **no** setup warnings:
-cron runs via the sidecar, proxies are trusted, DB is local.
+Log in to Nextcloud as `admin` with `admin-password` from your SOPS secret.
+Admin → Administration settings → Basic settings should show **no** setup
+warnings: cron runs via the sidecar, proxies are trusted, DB is local.
+
+Home Assistant: open https://ha.victorklomp.nl — the onboarding flow creates
+the first (owner) user and stores it in its PVC; no secret in git is involved.
+
 
 ### 5. Admin access from your workstation (optional)
 
@@ -167,12 +175,21 @@ kubectl logs -n nextcloud deploy/nextcloud -c nginx    --tail=100
 # suspend/resume app releases (e.g. during maintenance)
 flux suspend helmrelease -n nextcloud nextcloud
 flux resume  helmrelease -n nextcloud nextcloud
+flux suspend helmrelease -n home-assistant home-assistant
+flux resume  helmrelease -n home-assistant home-assistant
 ```
 
-Upgrades: Renovate pins `nextcloud 9.2.6` / `cert-manager v1.21.2` /
-`rclone/rclone:1.75.1` and opens PRs; merge when ready, Flux does the rest.
-Nextcloud majors (34 → 35) come through the chart bump — read the chart
-CHANGELOG before merging; the app runs `occ` upgrade hooks on container start.
+Home Assistant day-2: config lives in its PVC (`/config`), not in git — edit
+via the UI or `kubectl exec -it -n home-assistant pod/home-assistant-0 -- bash`
+and change files directly (then delete the pod to restart). StatefulSet, so
+the pod is `home-assistant-0` and chart upgrades recreate it in place.
+
+Upgrades: Renovate pins `nextcloud 9.2.6` / `home-assistant 0.3.80` /
+`cert-manager v1.21.2` / `rclone/rclone:1.75.1` and opens PRs; merge when
+ready, Flux does the rest. Nextcloud majors (34 → 35) come through the chart
+bump — read the chart CHANGELOG before merging; the app runs `occ` upgrade
+hooks on container start. Home Assistant chart majors are rare (0.x) and each
+bump carries a new HA release (monthly); the app migrates its DB on start.
 
 Config changes: edit `apps/nextcloud/helmrelease.yaml` values, commit, push.
 The pod template hash includes configs/phpConfigs, so pods roll on config change.
@@ -236,18 +253,22 @@ it is never the primary data dir.
 Backups are operated outside this repo. Whatever mechanism you use must cover,
 at minimum:
 
-1. **The PVC** `nextcloud-nextcloud` (local-path: on the node it lives under
-   `/var/lib/rancher/k3s/storage/...` — back that path up, or restic/k8up the
-   PVC, your call),
-2. **MariaDB data** (`mysqldump` into the same backup; a file-level copy of a
+1. **The Nextcloud PVC** `nextcloud-nextcloud` (local-path: on the node it lives
+   under `/var/lib/rancher/k3s/storage/...` — back that path up, or restic/k8up
+   the PVC, your call),
+2. **The Home Assistant PVC** `home-assistant-home-assistant-0` — its SQLite DB
+   (`/config/home-assistant_v2.db`) and all YAML config live there; a
+   file-level copy taken while the pod is stopped is consistent (single
+   SQLite writer),
+3. **MariaDB data** (`mysqldump` into the same backup; a file-level copy of a
    running DB is not a consistent dump),
-3. **This git repo** (GitHub) — the entire control plane is reproducible from it.
+4. **This git repo** (GitHub) — the entire control plane is reproducible from it.
 
 Full-cluster restore onto a fresh node:
 
 ```bash
 # 1. Repeat Bootstrap steps 2–3 (harden, k3s, Tailscale, flux bootstrap, sops-age)
-#    Flux re-creates namespaces, cert-manager, nextcloud, PVCs (empty).
+#    Flux re-creates namespaces, cert-manager, nextcloud, home-assistant, PVCs (empty).
 # 2. Stop the app before touching data:
 kubectl scale -n nextcloud deploy nextcloud --replicas=0
 kubectl delete pod -n nextcloud -l app.kubernetes.io/component=cronjob 2>/dev/null || true
@@ -285,3 +306,12 @@ brief disagreed:
 - **Chart renders an unused `nextcloud-db` Secret** (from default `mariadb.auth.password` = `changeme`) whenever bundled MariaDB is on. Nothing references it — the app reads `MYSQL_*` from `nextcloud-mariadb` via `externalDatabase.existingSecret` — so it is inert; just don't wire anything to it.
 - **Decryption only on the `apps` Kustomization** — `infrastructure` holds no encrypted resources, so it reconciles even before `sops-age` exists.
 - MariaDB and Redis are ClusterIP-only (chart default; no LoadBalancer/NodePort anywhere).
+
+Home Assistant (chart 0.3.80, values verified against its `values.yaml`):
+
+- **Chart choice:** no official HA chart exists; k8s-at-home is archived. The pajikos chart is auto-published with each HA release (2026.9.1 here), pins nothing weird, and renders a plain StatefulSet + Service + Ingress — verified by templating 0.3.80 locally.
+- **`hostNetwork: false` on purpose** — hostNetwork only buys mDNS/SSDP discovery on a home LAN; this HA runs on a datacenter VPS with no LAN, so it's pure downside (port conflicts with the host, non-cluster DNS). Integrations here are outbound-only (cloud APIs, MQTT, webhook over the ingress).
+- **`configuration.enabled: true`** makes the chart seed `configuration.yaml` and, on a fresh install only, `/config/.storage/http` with `use_x_forwarded_for` + `trusted_proxies: 10.42.0.0/16` (the pod CIDR Traefik hops arrive from — same rationale as the Nextcloud `trusted_proxies`). HA 2026.8+ moved these http settings from `configuration.yaml` into `.storage`; the chart writes the storage file only on first boot, so later UI edits win.
+- **PVC name** is `home-assistant-home-assistant-0`: the chart's default controller is a StatefulSet, so `persistence.*` renders as a `volumeClaimTemplates` entry (claim `home-assistant` + pod `home-assistant-0`), not a standalone PVC.
+- **No SOPS secret needed** — the chart has no admin-credential injection; HA's onboarding creates the owner user on first visit and keeps it in the PVC.
+- **SQLite kept** (chart default) — the recorder on a single-instance HA with a few hundred entities is well within SQLite's envelope; a separate DB would be another stateful pod for no gain.

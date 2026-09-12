@@ -1,0 +1,10 @@
+# Home Assistant community chart (auto-published with each HA release).
+# https://github.com/pajikos/home-assistant-helm-chart
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: pajikos
+  namespace: flux-system
+spec:
+  interval: 1h
+  url: https://pajikos.github.io/home-assistant-helm-chart/

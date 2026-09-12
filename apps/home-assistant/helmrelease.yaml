@@ -1,0 +1,72 @@
+# HelmRelease values verified against home-assistant chart 0.3.80
+# (appVersion 2026.9.1) — values.yaml:
+# https://github.com/pajikos/home-assistant-helm-chart/blob/main/charts/home-assistant/values.yaml
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: home-assistant
+  namespace: home-assistant
+spec:
+  interval: 30m
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+  chart:
+    spec:
+      chart: home-assistant
+      version: "0.3.80" # pinned; Renovate opens PRs
+      sourceRef:
+        kind: HelmRepository
+        name: pajikos
+        namespace: flux-system
+  values:
+    # Hetzner VPS, not a home server: no LAN to discover, so hostNetwork is
+    # off (it only helps mDNS/SSDP discovery inside a home network) and HA is
+    # reached exclusively via the ingress. Integrations that need to see the
+    # local network do not exist here; everything talks outbound (cloud APIs,
+    # MQTT, webhooks over this ingress).
+    hostNetwork: false
+
+    env:
+      - name: TZ
+        value: Europe/Amsterdam
+
+    # The chart seeds configuration.yaml (and, on fresh installs only, the
+    # HA 2026.8+ /config/.storage/http file) with use_x_forwarded_for and
+    # trusted_proxies — same pod CIDR as the Nextcloud trusted_proxies:
+    # Traefik -> HA hops are seen from 10.42.0.0/16.
+    configuration:
+      enabled: true
+      trusted_proxies:
+        - 10.42.0.0/16
+
+    persistence:
+      enabled: true
+      storageClass: local-path
+      size: 8Gi
+
+    ingress:
+      enabled: true
+      className: traefik
+      annotations:
+        cert-manager.io/cluster-issuer: letsencrypt-prod
+      hosts:
+        - host: ha.victorklomp.nl
+          paths:
+            - path: /
+              pathType: Prefix
+      tls:
+        - secretName: home-assistant-tls
+          hosts:
+            - ha.victorklomp.nl
+
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi

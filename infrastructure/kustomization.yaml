@@ -3,5 +3,6 @@ kind: Kustomization
 resources:
   - sources/nextcloud.yaml
   - sources/jetstack.yaml
+  - sources/pajikos.yaml
   - cert-manager/namespace.yaml
   - cert-manager/helmrelease.yaml
