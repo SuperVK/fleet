@@ -5,10 +5,10 @@ single-node k3s, reconciled end-to-end by Flux CD from this repository.
 
 - **Domains:** `cloud.victorklomp.nl` (Nextcloud), `ha.victorklomp.nl` (Home Assistant) — Let's Encrypt via cert-manager, HTTP-01 through Traefik
 - **Chart pins:** nextcloud **9.2.6** (app 34.0.3), home-assistant **0.3.80** (app 2026.9.1), cert-manager **v1.21.2** — Renovate opens PRs for bumps
-- **Storage:** `local-path` (single node, no replicated storage)
+- **Storage:** `local-path` (single node, no replicated storage) — PVC directories live on a dedicated **Hetzner Cloud Volume** mounted at `/var/lib/rancher/k3s/storage` (see Bootstrap §2)
 - **Secrets:** SOPS + age only, decrypted in-cluster by Flux; nothing plaintext in git
 - **Backups:** handled **outside this repo** by the operator (explicitly out of scope — see §Restore for what must be covered)
-- **RAW archive (~250GB):** lives in Hetzner Object Storage, mounted read-only as external storage; **never** on the node
+- **RAW archive (~250GB):** lives on a **Hetzner Storage Box**, mounted read-only in Nextcloud as external storage; **never** on the node
 
 ```
 Internet ──443──► Traefik (k3s bundled, LoadBalancer)
@@ -16,10 +16,10 @@ Internet ──443──► Traefik (k3s bundled, LoadBalancer)
                     ├─► Nextcloud (fpm image + nginx sidecar + cron sidecar)
                     │     ├── MariaDB (ClusterIP, local-path PVC 8Gi)
                     │     ├── Redis   (ClusterIP, cache only)
-                    │     └── PVC nextcloud-nextcloud (local-path, 150Gi)
+                    │     └── PVC nextcloud-nextcloud (local-path, 150Gi — on the Cloud Volume)
                     └─► Home Assistant (ClusterIP; no DB, SQLite in its PVC)
                           └── PVC home-assistant-home-assistant-0 (local-path, 8Gi)
-Admin ──Tailscale──► k3s API (6443, never public)
+Admin ──Tailscale──► k3s API (6443) + SSH (22) — never public
 GitOps: github.com/SuperVK/fleet ──► Flux ──► cluster
 ```
 
@@ -42,7 +42,7 @@ push**, because `apps/nextcloud/kustomization.yaml` references
 
 ### 0. Prerequisites
 
-- Hetzner VPS (CPX31-class, Debian 13), SSH key only — done from the console.
+- Hetzner VPS (CAX11-class, Debian 13), SSH key only — done from the console.
 - DNS: `A` records `cloud.victorklomp.nl` and `ha.victorklomp.nl` → VPS IPv4 (and `AAAA` if you want v6).
 - On your workstation: `flux`, `kubectl`, `sops`, `age` (e.g. via brew/apk/apt).
 - `git init -b main .` in this directory, and create the empty repo
@@ -73,24 +73,45 @@ git remote add origin git@github.com:SuperVK/fleet.git
 git push -u origin main
 ```
 
-### 2. Harden + k3s + Tailscale (on the VPS)
+### 2. Harden + data volume + k3s + Tailscale (on the VPS)
 
 ```bash
 apt update && apt upgrade -y
 apt install -y ufw unattended-upgrades
 ufw default deny incoming
 ufw default allow outgoing
-ufw allow 22/tcp
+ufw allow 22/tcp    # TEMPORARY: needed for bootstrap over the public IP; closed to Tailscale-only below
 ufw allow 80/tcp
 ufw allow 443/tcp
 # direct WireGuard for Tailscale (optional but recommended)
 ufw allow 41641/udp
-# kube API only over Tailscale
+# kube API only over Tailscale (SSH gets the same treatment below,
+# once Tailscale is up)
 ufw allow from 100.64.0.0/10 to any port 6443 proto tcp
 ufw enable
 
 curl -fsSL https://tailscale.com/install.sh | sh
 tailscale up
+tailscale ip -4    # note the node's Tailscale IP (also visible in the admin console)
+
+# Data volume for every PVC: k3s's bundled local-path-provisioner places all
+# PVC directories under /var/lib/rancher/k3s/storage, so mounting the Hetzner
+# Cloud Volume AT that path puts every PVC on it — zero manifest changes.
+# Must be mounted before k3s provisions the first PVC.
+ls -l /dev/disk/by-id/ | grep HC_Volume    # e.g. scsi-0HC_Volume_106859350
+mkfs.ext4 /dev/disk/by-id/scsi-0HC_Volume_106859350   # SKIP if the volume is already ext4 — it survives VPS reinstalls
+mkdir -p /var/lib/rancher/k3s/storage
+echo '/dev/disk/by-id/scsi-0HC_Volume_106859350 /var/lib/rancher/k3s/storage ext4 discard,nofail,defaults 0 0' >> /etc/fstab
+mount /var/lib/rancher/k3s/storage
+df -h /var/lib/rancher/k3s/storage         # must show the volume's size, not the root disk
+
+# SSH: Tailscale-only, like 6443. SAFETY: first open a second session over
+# Tailscale from your workstation (ssh root@<tailscale-ip>) and confirm it
+# works; only then run these — from that session. Your current public-IP
+# session survives (ufw permits established connections) but could not
+# reconnect if it dropped.
+ufw delete allow 22/tcp
+ufw allow from 100.64.0.0/10 to any port 22 proto tcp
 
 curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--write-kubeconfig-mode 644" sh -
 kubectl get nodes -o wide
@@ -102,12 +123,15 @@ Notes:
 - Traefik ships with k3s (a HelmChart in `kube-system`). Flux does **not** manage it; nothing needs changing.
 - `--write-kubeconfig-mode 644` makes `/etc/rancher/k3s/k3s.yaml` world-readable **on the node**; 6443 is firewalled to Tailscale, so this is a usability tradeoff, not an exposure.
 - Single node ⇒ flannel traffic never leaves the host; no extra firewall ports needed.
+- **Cloud-init auto-mount:** if the volume was attached at install time, cloud-init may have mounted it at `/mnt/HC_Volume_<id>` (check `grep HC_Volume /etc/fstab`). Keep only ONE fstab entry: `umount /mnt/HC_Volume_<id>`, delete that line, use the `/var/lib/rancher/k3s/storage` one instead.
+- **Volume size vs PVC size:** local-path does not enforce the requested PVC capacity against the actual disk — the 150Gi Nextcloud PVC binds fine on a smaller volume. If data outgrows the volume, resize it in Hetzner Console and `resize2fs` the device (both online, no rebuild).
+- **Break-glass:** with SSH Tailscale-only there is no way in if Tailscale breaks — that is the deliberate tradeoff. Recovery path is Hetzner Console → server → VNC console (or mounting the disk in rescue mode).
 
 ### 3. Flux bootstrap (on the VPS)
 
 ```bash
 # flux CLI
-curl -sSL https://fluxcd.io/install.sh | bash -s -- v2   # or download a release
+curl -sSL https://fluxcd.io/install.sh | bash  # or download a release
 export GITHUB_TOKEN=<personal access token, repo scope>
 
 cd /opt && git clone https://github.com/SuperVK/fleet.git && cd fleet
@@ -152,8 +176,10 @@ the first (owner) user and stores it in its PVC; no secret in git is involved.
 ### 5. Admin access from your workstation (optional)
 
 ```bash
-scp root@<vps>:/etc/rancher/k3s/k3s.yaml ~/.kube/fleet.yaml
-# replace 127.0.0.1 with the VPS Tailscale IP
+# SSH is Tailscale-only, so scp goes over the tailnet as well
+scp root@<tailscale-ip-or-name>:/etc/rancher/k3s/k3s.yaml ~/.kube/fleet.yaml
+# replace 127.0.0.1 in the copied file with the node's Tailscale IP
+# (tailscale ip -4 on the node)
 kubectl --kubeconfig ~/.kube/fleet.yaml get nodes
 ```
 
@@ -233,34 +259,47 @@ The pod template hash includes configs/phpConfigs, so pods roll on config change
    `<PVC>/data/<user>/files`, so no `chown` is needed.
 4. Verify: `rclone size onedrive:Photos` ≈ size of `files/Photos` in the UI.
 
-## RAW archive (Hetzner Object Storage, read-only peek)
+## RAW archive (Hetzner Storage Box, read-only peek)
 
-The ~250GB RAW set never touches the node. Upload from your workstation
-(ad hoc, not a k8s workload):
+The ~250GB RAW set never touches the node. It lives on a Hetzner **Storage Box**
+(cheaper than Object Storage at this size). Upload from your workstation
+(ad hoc, not a k8s workload) over SFTP — port 22, always on, nothing to enable:
 
 ```bash
-rclone config   # s3 backend, endpoint fsn1.your-objectstorage.com (or your region), path-style
-rclone copy /path/to/raw hetzner:raw-archive --transfers 4 --checkers 8 -P
-rclone check /path/to/raw hetzner:raw-archive --one-way --size-only
+rclone config   # sftp backend: host uXXXXX.your-storagebox.de, port 22, user uXXXXX, box password
+rclone copy /path/to/raw storagebox:raw-archive --transfers 4 --checkers 8 -P
+rclone check /path/to/raw storagebox:raw-archive --one-way --size-only
 ```
 
-Then mount it in Nextcloud as **read-only external storage** (not declarative in
-the chart — run once, it persists in the DB):
+Then mount it in Nextcloud as **read-only external storage** over WebDAV
+(not declarative in the chart — run once, it persists in the DB). WebDAV, not
+SMB: the official Nextcloud image ships no `php-smbclient`, so the SMB backend
+would need a custom image — the `dav` backend is pure PHP.
+
+Prerequisite: enable WebDAV for the box in Hetzner Console (Storage Box →
+Settings); activation takes a few minutes. Do **not** tick the box's own
+read-only option — a read-only box serves plain HTTP GETs and WebDAV clients
+(Nextcloud's included) cannot even list it. The read-only guarantee comes from
+the `readonly` mount option applied below.
+
+1. Create the mount — backend id `dav`, auth `password::password`; all options
+   (storage **and** auth) go via `--config`, so nothing is prompted:
 
 ```bash
 kubectl exec -n nextcloud deploy/nextcloud -c nextcloud -- occ files_external:create \
-  "RAW Archive" amazons3 amazons3::accesskey \
-  --config bucket=raw-archive \
-  --config hostname=fsn1.your-objectstorage.com \
-  --config region=eu-central \
-  --config use_path_style=true
-# it prompts for the access key / secret; then lock it down:
+  "RAW Archive" dav password::password \
+  --config host=uXXXXX.your-storagebox.de \
+  --config root=/raw-archive \
+  --config secure=true \
+  --config user=uXXXXX \
+  --config password='<storage box password>'
+# then lock it down (id comes from the create output):
 kubectl exec -n nextcloud deploy/nextcloud -c nextcloud -- occ files_external:option \
   <id-from-create-output> readonly true
 ```
 
-`occ files_external:list` shows the id. External storage is a browse mount only —
-it is never the primary data dir.
+`occ files_external:list` shows the id (and lets you verify the config). External
+storage is a browse mount only — it is never the primary data dir.
 
 ## Restore
 
@@ -268,8 +307,8 @@ Backups are operated outside this repo. Whatever mechanism you use must cover,
 at minimum:
 
 1. **The Nextcloud PVC** `nextcloud-nextcloud` (local-path: on the node it lives
-   under `/var/lib/rancher/k3s/storage/...` — back that path up, or restic/k8up
-   the PVC, your call),
+   under `/var/lib/rancher/k3s/storage/...` — that is the **Cloud Volume**
+   mount, so back the volume up, or restic/k8up the PVC, your call),
 2. **The Home Assistant PVC** `home-assistant-home-assistant-0` — its SQLite DB
    (`/config/home-assistant_v2.db`) and all YAML config live there; a
    file-level copy taken while the pod is stopped is consistent (single
@@ -281,14 +320,14 @@ at minimum:
 Full-cluster restore onto a fresh node:
 
 ```bash
-# 1. Repeat Bootstrap steps 2–3 (harden, k3s, Tailscale, flux bootstrap, sops-age)
+# 1. Repeat Bootstrap steps 2–3 (harden, data volume, k3s, Tailscale, flux bootstrap, sops-age)
 #    Flux re-creates namespaces, cert-manager, nextcloud, home-assistant, PVCs (empty).
 # 2. Stop the app before touching data:
 kubectl scale -n nextcloud deploy nextcloud --replicas=0
 kubectl delete pod -n nextcloud -l app.kubernetes.io/component=cronjob 2>/dev/null || true
 # 3. Restore the PVC contents into the local-path directory of the NEW PVC
 #    (kubectl get pvc -n nextcloud nextcloud-nextcloud -o jsonpath='{.spec.volumeName}'
-#     → find its /var/lib/rancher/k3s/storage path on the node).
+#     → find its /var/lib/rancher/k3s/storage path — on the Cloud Volume — on the node).
 # 4. Restore the DB dump:
 kubectl exec -i -n nextcloud deploy/nextcloud-mariadb -- \
   sh -c 'mariadb -uroot -p"$(cat $MARIADB_ROOT_PASSWORD)" nextcloud' < dump.sql
@@ -329,3 +368,8 @@ Home Assistant (chart 0.3.80, values verified against its `values.yaml`):
 - **PVC name** is `home-assistant-home-assistant-0`: the chart's default controller is a StatefulSet, so `persistence.*` renders as a `volumeClaimTemplates` entry (claim `home-assistant` + pod `home-assistant-0`), not a standalone PVC.
 - **No SOPS secret needed** — the chart has no admin-credential injection; HA's onboarding creates the owner user on first visit and keeps it in the PVC.
 - **SQLite kept** (chart default) — the recorder on a single-instance HA with a few hundred entities is well within SQLite's envelope; a separate DB would be another stateful pod for no gain.
+
+Infra-level decisions (not from any chart's values):
+
+- **PVCs on a dedicated Hetzner Cloud Volume**, mounted at `/var/lib/rancher/k3s/storage` — the exact path k3s's local-path-provisioner provisions into. Zero manifest changes (the `local-path` storage class is untouched), and the volume survives VPS reinstalls while its mount step is part of Bootstrap §2.
+- **RAW archive on a Storage Box, not Object Storage** (user decision — cheaper at ~250GB). Upload via SFTP (rclone), browse via the files_external `dav` (WebDAV) backend: the official Nextcloud image has no `php-smbclient`, so SMB would require a custom image. Backend/auth ids (`dav`, `password::password`) and the `--config`-carries-auth-options behavior verified against `apps/files_external/lib/Command/Create.php` in server 34.
