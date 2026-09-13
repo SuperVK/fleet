@@ -1,0 +1,33 @@
+# PHP ini override for the fpm container. Mounted into
+# /usr/local/etc/php/conf.d/ (see helmrelease.yaml extraVolumeMounts) with the
+# zz- prefix so it loads LAST and overrides the image's
+# conf.d/opcache-recommended.ini (alphabetical scan order).
+#
+# Why not nextcloud.phpConfigs? With nginx.enabled=true the chart writes those
+# to /usr/local/etc/php-fpm.d/php.ini — and php-fpm.conf only includes
+# php-fpm.d/*.conf, so the file is never read. phpConfigs is inert in this
+# setup; this ConfigMap is the working equivalent.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nextcloud-php-ini
+  namespace: nextcloud
+data:
+  zz-nextcloud.ini: |
+    ; PHP 8.5 (image 34.0.3-fpm) ships opcache.jit=1255 (tracing JIT, 8M
+    ; buffer). 2026-09-13: after installing user_oidc, JIT-compiled traces
+    ; started segfaulting every fpm worker (SIGSEGV, 502s, nginx sidecar
+    ; crashloop on failed probes). CLI was unaffected (opcache.enable_cli=Off),
+    ; and the poisoned opcache SHM kept crashing requests until the container
+    ; restarted. Tracing JIT has a recurring segfault history and Nextcloud is
+    ; I/O-bound — disable it entirely.
+    opcache.jit = disable
+    opcache.jit_buffer_size = 0
+
+    ; Limits that the old (inert) phpConfigs block intended: nginx
+    ; client_max_body_size is 10G, PHP must match.
+    memory_limit = 512M
+    upload_max_filesize = 10G
+    post_max_size = 10G
+    max_execution_time = 3600
+    max_input_time = 3600

@@ -48,12 +48,20 @@ spec:
             'overwriteprotocol' => 'https',
             'maintenance_window_start' => 1,
           );
-      phpConfigs:
-        php.ini: |
-          memory_limit = 512M
-          upload_max_filesize = 10G
-          post_max_size = 10G
-
+      # PHP ini settings live in the nextcloud-php-ini ConfigMap
+      # (php-conf.yaml), NOT here: with nginx.enabled=true the chart writes
+      # phpConfigs to /usr/local/etc/php-fpm.d/php.ini, which php-fpm never
+      # includes (php-fpm.conf globs *.conf only) — the settings were silently
+      # ignored. The ConfigMap is mounted into /usr/local/etc/php/conf.d/
+      # below, which both CLI and fpm actually scan.
+      extraVolumes:
+        - name: php-ini
+          configMap:
+            name: nextcloud-php-ini
+      extraVolumeMounts:
+        - name: php-ini
+          mountPath: /usr/local/etc/php/conf.d/zz-nextcloud.ini
+          subPath: zz-nextcloud.ini
     nginx:
       enabled: true
       config:
