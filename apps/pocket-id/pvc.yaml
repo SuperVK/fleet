@@ -1,0 +1,12 @@
+# SQLite DB + uploaded logos only — KBs to MBs of data; 1Gi is generous.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pocket-id
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi

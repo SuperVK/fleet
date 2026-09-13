@@ -1,10 +1,11 @@
-# fleet — Nextcloud + Home Assistant on single-node k3s + Flux CD (GitOps)
+# fleet — Nextcloud + Home Assistant + Pocket ID on single-node k3s + Flux CD (GitOps)
 
-Personal Nextcloud and Home Assistant on a Hetzner VPS (Debian 13, CPX31-class),
-single-node k3s, reconciled end-to-end by Flux CD from this repository.
+Personal Nextcloud, Home Assistant and Pocket ID (passkey SSO/OIDC) on a Hetzner
+VPS (Debian 13, CPX31-class), single-node k3s, reconciled end-to-end by Flux CD
+from this repository.
 
-- **Domains:** `cloud.victorklomp.nl` (Nextcloud), `ha.victorklomp.nl` (Home Assistant) — Let's Encrypt via cert-manager, HTTP-01 through Traefik
-- **Chart pins:** nextcloud **9.2.6** (app 34.0.3), home-assistant **0.3.80** (app 2026.9.1), cert-manager **v1.21.2** — Renovate opens PRs for bumps
+- **Domains:** `cloud.victorklomp.nl` (Nextcloud), `ha.victorklomp.nl` (Home Assistant), `sso.victorklomp.nl` (Pocket ID) — Let's Encrypt via cert-manager, HTTP-01 through Traefik
+- **Pins:** nextcloud **9.2.6** (app 34.0.3), home-assistant **0.3.80** (app 2026.9.1), cert-manager **v1.21.2** (charts); pocket-id image **v2.14.0** (plain manifests, no official chart) — Renovate opens PRs for bumps
 - **Storage:** `local-path` (single node, no replicated storage) — PVC directories live on a dedicated **Hetzner Cloud Volume** mounted at `/var/lib/rancher/k3s/storage` (see Bootstrap §2)
 - **Secrets:** SOPS + age only, decrypted in-cluster by Flux; nothing plaintext in git
 - **Backups:** handled **outside this repo** by the operator (explicitly out of scope — see §Restore for what must be covered)
@@ -17,8 +18,10 @@ Internet ──443──► Traefik (k3s bundled, LoadBalancer)
                     │     ├── MariaDB (ClusterIP, local-path PVC 8Gi)
                     │     ├── Redis   (ClusterIP, cache only)
                     │     └── PVC nextcloud-nextcloud (local-path, 150Gi — on the Cloud Volume)
-                    └─► Home Assistant (ClusterIP; no DB, SQLite in its PVC)
-                          └── PVC home-assistant-home-assistant-0 (local-path, 8Gi)
+                    ├─► Home Assistant (ClusterIP; no DB, SQLite in its PVC)
+                    │     └── PVC home-assistant-home-assistant-0 (local-path, 8Gi)
+                    └─► Pocket ID (OIDC provider, passkeys; SQLite in its PVC)
+                          └── PVC pocket-id (local-path, 1Gi)
 Admin ──Tailscale──► k3s API (6443) + SSH (22) — never public
 GitOps: github.com/SuperVK/fleet ──► Flux ──► cluster
 ```
@@ -32,18 +35,20 @@ clusters/prod/                      # Flux: infrastructure.yaml, issuers.yaml, a
 infrastructure/                     # HelmRepositories, cert-manager (HelmRelease), issuers/ (ClusterIssuer)
 apps/nextcloud/                     # namespace, HelmRelease, SOPS secrets, import Job (suspended)
 apps/home-assistant/                # namespace, HelmRelease (no secrets needed — onboarding user is created in the UI)
+apps/pocket-id/                     # namespace, plain Deployment/Service/PVC/Ingress (no official chart), SOPS secret (ENCRYPTION_KEY)
 ```
 
 ## Bootstrap (once)
 
 Order matters: the age key and encrypted secrets must exist **before the first
-push**, because `apps/nextcloud/kustomization.yaml` references
-`secrets.sops.yaml` and Flux fails the `apps` Kustomization while it is missing.
+push**, because `apps/nextcloud/kustomization.yaml` (and `apps/pocket-id/`)
+reference `secrets.sops.yaml` and Flux fails the `apps` Kustomization while it
+is missing.
 
 ### 0. Prerequisites
 
 - Hetzner VPS (CAX11-class, Debian 13), SSH key only — done from the console.
-- DNS: `A` records `cloud.victorklomp.nl` and `ha.victorklomp.nl` → VPS IPv4 (and `AAAA` if you want v6).
+- DNS: `A` records `cloud.victorklomp.nl`, `ha.victorklomp.nl` and `sso.victorklomp.nl` → VPS IPv4 (and `AAAA` if you want v6).
 - On your workstation: `flux`, `kubectl`, `sops`, `age` (e.g. via brew/apk/apt).
 - `git init -b main .` in this directory, and create the empty repo
   `SuperVK/fleet` on GitHub (no README/license — keep it empty).
@@ -150,17 +155,20 @@ kubectl create secret generic sops-age -n flux-system \
 ```bash
 flux get kustomizations -A          # all Ready=True
 kubectl get pods -n cert-manager    # 3 Running
-kubectl get certificate -A          # nextcloud-tls, home-assistant-tls Ready=True
+kubectl get certificate -A          # nextcloud-tls, home-assistant-tls, pocket-id-tls Ready=True
 kubectl get pods -n nextcloud       # nextcloud, mariadb, redis Running
 kubectl get pods -n home-assistant  # home-assistant-0 Running
+kubectl get pods -n pocket-id       # pocket-id Running
+kubectl get pvc -A                  # 4 Bound (nextcloud, mariadb, redis, HA) + pocket-id
 curl -I https://cloud.victorklomp.nl/status.php   # 200
 curl -I https://ha.victorklomp.nl                 # 200
+curl -I https://sso.victorklomp.nl                # 200 (or 302 to /setup)
 ```
 
 First reconcile takes a few minutes and happens in strict order:
 `infrastructure` (installs cert-manager + its CRDs) → `issuers` (the
 ClusterIssuer, which dry-run-fails until those CRDs exist — that's why it is a
-separate Kustomization with `dependsOn`) → `apps` (Nextcloud, Home Assistant).
+separate Kustomization with `dependsOn`) → `apps` (Nextcloud, Home Assistant, Pocket ID).
 Co-locating the ClusterIssuer with the HelmRelease deadlocks: one dry-run
 failure aborts the whole Kustomization apply, so the HelmRelease that provides
 the CRDs never lands.
@@ -171,6 +179,11 @@ warnings: cron runs via the sidecar, proxies are trusted, DB is local.
 
 Home Assistant: open https://ha.victorklomp.nl — the onboarding flow creates
 the first (owner) user and stores it in its PVC; no secret in git is involved.
+
+Pocket ID: open https://sso.victorklomp.nl/setup — the first visit registers the
+admin passkey and claims the instance (same pattern as HA: no admin secret in
+git; the only secret is the SOPS `ENCRYPTION_KEY`). OIDC clients for other apps
+are then added in its admin UI.
 
 
 ### 5. Admin access from your workstation (optional)
@@ -315,13 +328,17 @@ at minimum:
    SQLite writer),
 3. **MariaDB data** (`mysqldump` into the same backup; a file-level copy of a
    running DB is not a consistent dump),
-4. **This git repo** (GitHub) — the entire control plane is reproducible from it.
+4. **The Pocket ID PVC** `pocket-id` — SQLite DB with users, passkeys and OIDC
+   clients, all encrypted at rest with the `ENCRYPTION_KEY` from the SOPS secret
+   (which is in git). Losing that key invalidates every client credential, so
+   the PVC and the repo secret must be restored as a pair,
+5. **This git repo** (GitHub) — the entire control plane is reproducible from it.
 
 Full-cluster restore onto a fresh node:
 
 ```bash
 # 1. Repeat Bootstrap steps 2–3 (harden, data volume, k3s, Tailscale, flux bootstrap, sops-age)
-#    Flux re-creates namespaces, cert-manager, nextcloud, home-assistant, PVCs (empty).
+#    Flux re-creates namespaces, cert-manager, nextcloud, home-assistant, pocket-id, PVCs (empty).
 # 2. Stop the app before touching data:
 kubectl scale -n nextcloud deploy nextcloud --replicas=0
 kubectl delete pod -n nextcloud -l app.kubernetes.io/component=cronjob 2>/dev/null || true
@@ -359,6 +376,15 @@ brief disagreed:
 - **Chart renders an unused `nextcloud-db` Secret** (from default `mariadb.auth.password` = `changeme`) whenever bundled MariaDB is on. Nothing references it — the app reads `MYSQL_*` from `nextcloud-mariadb` via `externalDatabase.existingSecret` — so it is inert; just don't wire anything to it.
 - **Decryption only on the `apps` Kustomization** — `infrastructure` holds no encrypted resources, so it reconciles even before `sops-age` exists.
 - MariaDB and Redis are ClusterIP-only (chart default; no LoadBalancer/NodePort anywhere).
+
+Pocket ID (image v2.14.0, plain Kustomize manifests — no chart):
+
+- **No Helm chart on purpose** — every published chart is community-maintained (matslarson, anza-labs, TrueCharts, …) and unofficial; the app is a single Go binary with SQLite, so Deployment + Service + PVC + Ingress is the whole story. Renovate still bumps the image (`docker.fileMatch` covers `apps/**/*.yaml`); the image is multi-arch and the node is arm64.
+- **Deployment, not StatefulSet** — one replica on an RWO local-path PVC; on a single node a StatefulSet buys nothing (Pocket ID's own docker-compose is one container).
+- **`TRUST_PROXY=10.42.0.0/16`** — same pod-CIDR rationale as the Nextcloud `trusted_proxies`; without it, rate limiting and the audit log only ever see Traefik's pod IP.
+- **`ENCRYPTION_KEY` in SOPS** — Pocket ID encrypts its token-signing keys with it; the ciphertext lives in the PVC and the key in git, so §Restore treats them as a pair. Unlike nextcloud there is nothing user-specific to fill in, so the encrypted secret is generated and committed directly (template kept as `secrets.sops.yaml.example`).
+- **Healthcheck via exec** (`/app/pocket-id healthcheck`, the command from Pocket ID's own compose file) — the app exposes no HTTP health endpoint to probe instead.
+- **HTTPS mandatory** — WebAuthn requires a secure context; traefik + cert-manager already provide it, so the ingress is plain.
 
 Home Assistant (chart 0.3.80, values verified against its `values.yaml`):
 

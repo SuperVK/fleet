@@ -1,0 +1,86 @@
+# Pocket ID — passkey-based OIDC provider (sso.victorklomp.nl).
+# Plain manifests on purpose: no official Helm chart exists (the published ones
+# are community-maintained), and the app is a single Go binary with SQLite —
+# Deployment + Service + PVC + Ingress is all it needs.
+# Env reference: https://pocket-id.org/docs/configuration/environment-variables
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pocket-id
+  labels:
+    app.kubernetes.io/name: pocket-id
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pocket-id
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pocket-id
+    spec:
+      containers:
+        - name: pocket-id
+          # Pinned; Renovate bumps (multi-arch image, arm64 included).
+          image: ghcr.io/pocket-id/pocket-id:v2.14.0
+          env:
+            - name: APP_URL
+              value: https://sso.victorklomp.nl
+            - name: TRUST_PROXY
+              # Pod CIDR of this single-node k3s: Traefik -> pocket-id hops are
+              # seen from 10.42.0.0/16 — same rationale as the Nextcloud
+              # trusted_proxies. Without it, rate limiting and the audit log
+              # only ever see Traefik's pod IP.
+              value: 10.42.0.0/16
+            - name: ALLOW_INSECURE_CALLBACK_URLS
+              # All clients use https callbacks; keep the stricter default off.
+              value: "false"
+            - name: ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: pocket-id
+                  key: encryption-key
+          ports:
+            - name: http
+              containerPort: 1411
+          # Documented healthcheck (docker-compose.yml uses the same command);
+          # Pocket ID exposes no HTTP health endpoint to probe instead.
+          livenessProbe:
+            exec:
+              command: ["/app/pocket-id", "healthcheck"]
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            exec:
+              command: ["/app/pocket-id", "healthcheck"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: pocket-id
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pocket-id
+  labels:
+    app.kubernetes.io/name: pocket-id
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: pocket-id
+  ports:
+    - name: http
+      port: 1411
+      targetPort: http

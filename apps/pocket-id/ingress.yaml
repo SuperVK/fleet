@@ -1,0 +1,25 @@
+# HTTPS is mandatory for Pocket ID: WebAuthn/passkeys require a secure context.
+# traefik + cert-manager provide it, same as the other two apps.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: pocket-id
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - sso.victorklomp.nl
+      secretName: pocket-id-tls
+  rules:
+    - host: sso.victorklomp.nl
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: pocket-id
+                port:
+                  name: http
