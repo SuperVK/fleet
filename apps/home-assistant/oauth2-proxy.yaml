@@ -36,6 +36,19 @@ spec:
         - name: oauth2-proxy
           # Pinned; Renovate bumps (multi-arch image).
           image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.4
+          # Flags via args, not OAUTH2_PROXY_* env — the env names for
+          # repeatable (slice) flags are not documented, args are explicit.
+          args:
+            # oauth2-proxy v7.15 changed the default http-address to
+            # 127.0.0.1:4180: loopback-only inside the container, so the pod
+            # IP never answers (probes refused, Traefik sees no endpoints,
+            # 503 "no available server"). Bind all interfaces explicitly.
+            - --http-address=0.0.0.0:4180
+            # Only Traefik (pod CIDR) may supply X-Forwarded-* headers; the
+            # default trusts 0.0.0.0/0 for backwards compatibility.
+            - --trusted-proxy-ip=10.42.0.0/16
+            # Pocket ID advertises PKCE S256 — use it instead of skipping it.
+            - --code-challenge-method=S256
           env:
             - name: OAUTH2_PROXY_PROVIDER
               value: oidc
