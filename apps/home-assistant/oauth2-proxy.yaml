@@ -1,0 +1,115 @@
+# oauth2-proxy gates ha.victorklomp.nl behind Pocket ID (standard OIDC
+# provider; discovery at https://sso.victorklomp.nl/.well-known/openid-configuration)
+# before traffic reaches Home Assistant. Plain manifests like pocket-id — the
+# official chart adds nothing this config needs. Everything is configured via
+# OAUTH2_PROXY_* env vars:
+# https://oauth2-proxy.github.io/oauth2-proxy/configuration/overview/#environment-variables
+#
+# Flow: Traefik -> oauth2-proxy (:4180) -> home-assistant (:8123).
+# - /oauth2/* (start / callback / sign_out) and /ping are served by
+#   oauth2-proxy itself, never proxied upstream.
+# - ^/api/ bypasses the SSO gate (SKIP_AUTH_ROUTES): the companion apps
+#   authenticate with HA's own tokens and integrations deliver webhooks over
+#   this ingress; HA enforces its own auth on /api/ regardless. Everything
+#   else (the web UI) requires a Pocket ID session first — HA's own login
+#   still runs behind the gate.
+# - Pocket ID side: add an OIDC client in its admin UI with callback URL
+#   https://ha.victorklomp.nl/oauth2/callback; its id/secret live in the
+#   SOPS secret (secrets.sops.yaml.example documents the flow).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oauth2-proxy
+  labels:
+    app.kubernetes.io/name: oauth2-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: oauth2-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: oauth2-proxy
+    spec:
+      containers:
+        - name: oauth2-proxy
+          # Pinned; Renovate bumps (multi-arch image).
+          image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.4
+          env:
+            - name: OAUTH2_PROXY_PROVIDER
+              value: oidc
+            - name: OAUTH2_PROXY_OIDC_ISSUER_URL
+              value: https://sso.victorklomp.nl
+            - name: OAUTH2_PROXY_UPSTREAMS
+              value: http://home-assistant.home-assistant.svc.cluster.local:8123
+            - name: OAUTH2_PROXY_REDIRECT_URL
+              value: https://ha.victorklomp.nl/oauth2/callback
+            # Traefik terminates TLS and sets X-Forwarded-*; trust it. Both
+            # hops (Traefik, oauth2-proxy) run inside 10.42.0.0/16, the pod
+            # CIDR HA trusts as proxies — same rationale as Nextcloud.
+            - name: OAUTH2_PROXY_REVERSE_PROXY
+              value: "true"
+            - name: OAUTH2_PROXY_COOKIE_SECURE
+              value: "true"
+            # Personal instance: every Pocket ID user may pass the gate.
+            - name: OAUTH2_PROXY_EMAIL_DOMAINS
+              value: "*"
+            - name: OAUTH2_PROXY_SKIP_AUTH_ROUTES
+              value: ^/api/
+            # Never forward a Basic-auth Authorization header upstream — HA
+            # does its own auth and must not see a foreign Authorization.
+            - name: OAUTH2_PROXY_PASS_BASIC_AUTH
+              value: "false"
+            - name: OAUTH2_PROXY_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: oauth2-proxy
+                  key: client-id
+            - name: OAUTH2_PROXY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: oauth2-proxy
+                  key: client-secret
+            - name: OAUTH2_PROXY_COOKIE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: oauth2-proxy
+                  key: cookie-secret
+          ports:
+            - name: http
+              containerPort: 4180
+          # /ping is oauth2-proxy's documented unauthenticated health endpoint.
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oauth2-proxy
+  labels:
+    app.kubernetes.io/name: oauth2-proxy
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: oauth2-proxy
+  ports:
+    - name: http
+      port: 4180

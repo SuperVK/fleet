@@ -1,0 +1,28 @@
+# Owns ha.victorklomp.nl. The chart's ingress is disabled (helmrelease.yaml
+# sets ingress.external instead) so this is the only Ingress for the host and
+# routes everything through oauth2-proxy — same shape as the pocket-id
+# Ingress. secretName stays home-assistant-tls so the certificate rolls over
+# without a new order.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: home-assistant
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - ha.victorklomp.nl
+      secretName: home-assistant-tls
+  rules:
+    - host: ha.victorklomp.nl
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: oauth2-proxy
+                port:
+                  name: http

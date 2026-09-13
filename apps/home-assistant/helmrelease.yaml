@@ -36,8 +36,9 @@ spec:
 
     # The chart seeds configuration.yaml (and, on fresh installs only, the
     # HA 2026.8+ /config/.storage/http file) with use_x_forwarded_for and
-    # trusted_proxies — same pod CIDR as the Nextcloud trusted_proxies:
-    # Traefik -> HA hops are seen from 10.42.0.0/16.
+    # trusted_proxies. The pod CIDR 10.42.0.0/16 covers BOTH hops in front of
+    # HA — Traefik and the oauth2-proxy SSO gate — same rationale as the
+    # Nextcloud trusted_proxies.
     configuration:
       enabled: true
       trusted_proxies:
@@ -48,20 +49,23 @@ spec:
       storageClass: local-path
       size: 8Gi
 
+    # Chart default is 8080; 8123 is HA's own port, which keeps the
+    # oauth2-proxy upstream URL obvious. Nothing else about the Service
+    # changes.
+    service:
+      port: 8123
+
+    # The public ingress is NOT the chart's: apps/home-assistant/ingress.yaml
+    # owns ha.victorklomp.nl and routes it through oauth2-proxy (Pocket ID
+    # SSO gate) to this release's Service. ingress.external is a pure flag in
+    # this chart (verified against 0.3.80 templates): it renders no resource
+    # but keeps the configmap's http-storage.json seed alive, so a fresh
+    # install still gets trusted_proxies. With ingress.enabled=false alone
+    # that seed would be dropped and every request through the proxies would
+    # hit HA's "untrusted proxy" 400.
     ingress:
-      enabled: true
-      className: traefik
-      annotations:
-        cert-manager.io/cluster-issuer: letsencrypt-prod
-      hosts:
-        - host: ha.victorklomp.nl
-          paths:
-            - path: /
-              pathType: Prefix
-      tls:
-        - secretName: home-assistant-tls
-          hosts:
-            - ha.victorklomp.nl
+      enabled: false
+      external: true
 
     resources:
       requests:

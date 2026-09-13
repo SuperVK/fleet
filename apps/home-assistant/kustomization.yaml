@@ -4,3 +4,13 @@ namespace: home-assistant
 resources:
   - namespace.yaml
   - helmrelease.yaml
+  # Pocket ID SSO gate in front of HA (Deployment/Service + the Ingress that
+  # owns ha.victorklomp.nl; the chart's ingress is off, see helmrelease.yaml).
+  - oauth2-proxy.yaml
+  - ingress.yaml
+  # SOPS-encrypted with the repo age key. client-id/client-secret are
+  # CHANGE_ME placeholders until the Pocket ID OIDC client is registered
+  # (secrets.sops.yaml.example documents the flow); cookie-secret was
+  # generated once and committed. The pod runs with placeholders but the
+  # SSO login fails at Pocket ID's token exchange until they are filled in.
+  - secrets.sops.yaml

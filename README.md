@@ -5,7 +5,7 @@ VPS (Debian 13, CPX31-class), single-node k3s, reconciled end-to-end by Flux CD
 from this repository.
 
 - **Domains:** `cloud.victorklomp.nl` (Nextcloud), `ha.victorklomp.nl` (Home Assistant), `sso.victorklomp.nl` (Pocket ID) — Let's Encrypt via cert-manager, HTTP-01 through Traefik
-- **Pins:** nextcloud **9.2.6** (app 34.0.3), home-assistant **0.3.80** (app 2026.9.1), cert-manager **v1.21.2** (charts); pocket-id image **v2.14.0** (plain manifests, no official chart) — Renovate opens PRs for bumps
+- **Pins:** nextcloud **9.2.6** (app 34.0.3), home-assistant **0.3.80** (app 2026.9.1), cert-manager **v1.21.2** (charts); pocket-id image **v2.14.0**, oauth2-proxy image **v7.15.4** (both plain manifests, no official chart) — Renovate opens PRs for bumps
 - **Storage:** `local-path` (single node, no replicated storage) — PVC directories live on a dedicated **Hetzner Cloud Volume** mounted at `/var/lib/rancher/k3s/storage` (see Bootstrap §2)
 - **Secrets:** SOPS + age only, decrypted in-cluster by Flux; nothing plaintext in git
 - **Backups:** handled **outside this repo** by the operator (explicitly out of scope — see §Restore for what must be covered)
@@ -18,7 +18,7 @@ Internet ──443──► Traefik (k3s bundled, LoadBalancer)
                     │     ├── MariaDB (ClusterIP, local-path PVC 8Gi)
                     │     ├── Redis   (ClusterIP, cache only)
                     │     └── PVC nextcloud-nextcloud (local-path, 150Gi — on the Cloud Volume)
-                    ├─► Home Assistant (ClusterIP; no DB, SQLite in its PVC)
+                    ├─► oauth2-proxy (SSO gate: Pocket ID OIDC) ─► Home Assistant (ClusterIP; no DB, SQLite in its PVC)
                     │     └── PVC home-assistant-home-assistant-0 (local-path, 8Gi)
                     └─► Pocket ID (OIDC provider, passkeys; SQLite in its PVC)
                           └── PVC pocket-id (local-path, 1Gi)
@@ -34,7 +34,7 @@ renovate.json                       # Renovate: pin + bump charts/images
 clusters/prod/                      # Flux: infrastructure.yaml, issuers.yaml, apps.yaml (flux bootstrap adds flux-system/)
 infrastructure/                     # HelmRepositories, cert-manager (HelmRelease), issuers/ (ClusterIssuer)
 apps/nextcloud/                     # namespace, HelmRelease, SOPS secrets, import Job (suspended)
-apps/home-assistant/                # namespace, HelmRelease (no secrets needed — onboarding user is created in the UI)
+apps/home-assistant/                # namespace, HelmRelease (chart ingress off; own Ingress routes via oauth2-proxy), oauth2-proxy Deployment/Service, SOPS secret (Pocket ID client credentials)
 apps/pocket-id/                     # namespace, plain Deployment/Service/PVC/Ingress (no official chart), SOPS secret (ENCRYPTION_KEY)
 ```
 
@@ -157,11 +157,11 @@ flux get kustomizations -A          # all Ready=True
 kubectl get pods -n cert-manager    # 3 Running
 kubectl get certificate -A          # nextcloud-tls, home-assistant-tls, pocket-id-tls Ready=True
 kubectl get pods -n nextcloud       # nextcloud, mariadb, redis Running
-kubectl get pods -n home-assistant  # home-assistant-0 Running
+kubectl get pods -n home-assistant  # home-assistant-0, oauth2-proxy Running
 kubectl get pods -n pocket-id       # pocket-id Running
 kubectl get pvc -A                  # 4 Bound (nextcloud, mariadb, redis, HA) + pocket-id
 curl -I https://cloud.victorklomp.nl/status.php   # 200
-curl -I https://ha.victorklomp.nl                 # 200
+curl -I https://ha.victorklomp.nl                 # 302 to the Pocket ID login (see §Day-2: register the OIDC client first)
 curl -I https://sso.victorklomp.nl                # 200 (or 302 to /setup)
 ```
 
@@ -177,8 +177,10 @@ Log in to Nextcloud as `admin` with `admin-password` from your SOPS secret.
 Admin → Administration settings → Basic settings should show **no** setup
 warnings: cron runs via the sidecar, proxies are trusted, DB is local.
 
-Home Assistant: open https://ha.victorklomp.nl — the onboarding flow creates
-the first (owner) user and stores it in its PVC; no secret in git is involved.
+Home Assistant: open https://ha.victorklomp.nl — behind the oauth2-proxy SSO
+gate, so authenticate with your Pocket ID passkey first; the onboarding flow
+then creates the first (owner) user and stores it in its PVC. The gate needs
+its OIDC client registered before the first login works — see §Day-2.
 
 Pocket ID: open https://sso.victorklomp.nl/setup — the first visit registers the
 admin passkey and claims the instance (same pattern as HA: no admin secret in
@@ -225,6 +227,27 @@ the pod is `home-assistant-0` and chart upgrades recreate it in place. Logs:
 `kubectl logs -n home-assistant home-assistant-0 -f` (init container:
 `-c setup-config`; HA's own log file is `/config/home-assistant.log`).
 
+**Home Assistant SSO gate (oauth2-proxy + Pocket ID).** `ha.victorklomp.nl`
+is routed Traefik → oauth2-proxy → HA; the web UI requires a Pocket ID
+passkey session before HA's own login page is even served. `^/api/` bypasses
+the gate (`OAUTH2_PROXY_SKIP_AUTH_ROUTES` in `apps/home-assistant/oauth2-proxy.yaml`)
+so the companion apps (HA's own token auth) and integration webhooks keep
+working — HA still enforces authentication on `/api/` itself.
+
+One-time setup (the committed SOPS secret ships placeholders):
+
+```bash
+# 1. Pocket ID admin UI (sso.victorklomp.nl) → API Keys → new OIDC client,
+#    callback URL: https://ha.victorklomp.nl/oauth2/callback
+# 2. Fill in the generated credentials:
+SOPS_AGE_KEY_FILE=age.agekey sops edit apps/home-assistant/secrets.sops.yaml
+#    client-id / client-secret ← Pocket ID; leave cookie-secret as is
+# 3. Commit, push; Flux rolls the Deployment within 10m.
+```
+
+Rotating `cookie-secret` only drops every active SSO session (users
+re-authenticate). Gate logs: `kubectl logs -n home-assistant deploy/oauth2-proxy`.
+
 **Restoring a backup wipes the reverse-proxy trust.** An imported backup
 replaces `/config/.storage/http` with the source instance's settings, so
 `trusted_proxies` no longer covers the pod CIDR and every request through
@@ -238,11 +261,12 @@ kubectl --kubeconfig ~/.kube/fleet.yaml --insecure-skip-tls-verify delete pod -n
 ```
 
 Upgrades: Renovate pins `nextcloud 9.2.6` / `home-assistant 0.3.80` /
-`cert-manager v1.21.2` / `rclone/rclone:1.75.1` and opens PRs; merge when
-ready, Flux does the rest. Nextcloud majors (34 → 35) come through the chart
-bump — read the chart CHANGELOG before merging; the app runs `occ` upgrade
-hooks on container start. Home Assistant chart majors are rare (0.x) and each
-bump carries a new HA release (monthly); the app migrates its DB on start.
+`cert-manager v1.21.2` / `rclone/rclone:1.75.1` / `oauth2-proxy v7.15.4` and
+opens PRs; merge when ready, Flux does the rest. Nextcloud majors (34 → 35)
+come through the chart bump — read the chart CHANGELOG before merging; the app
+runs `occ` upgrade hooks on container start. Home Assistant chart majors are
+rare (0.x) and each bump carries a new HA release (monthly); the app migrates
+its DB on start.
 
 Config changes: edit `apps/nextcloud/helmrelease.yaml` values, commit, push.
 The pod template hash includes configs/phpConfigs, so pods roll on config change.
