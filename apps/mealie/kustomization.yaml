@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: mealie
+resources:
+  - namespace.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - ingress.yaml
+  # SOPS-encrypted with the repo age key; ships CHANGE_ME placeholders like the
+  # HA gate secret until the Pocket ID OIDC client is registered (README §Day-2).
+  - secrets.sops.yaml

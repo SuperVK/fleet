@@ -1,0 +1,13 @@
+# SQLite DB, uploaded recipe images and Mealie's auto-backup zips (20 kept by
+# default) — MBs of data; 2Gi is generous headroom.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mealie
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 2Gi

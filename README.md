@@ -1,11 +1,12 @@
-# fleet — Nextcloud + Home Assistant + Pocket ID on single-node k3s + Flux CD (GitOps)
+# fleet — Nextcloud + Home Assistant + Pocket ID + Mealie on single-node k3s + Flux CD (GitOps)
 
-Personal Nextcloud, Home Assistant and Pocket ID (passkey SSO/OIDC) on a Hetzner
+Personal Nextcloud, Home Assistant, Pocket ID (passkey SSO/OIDC) and Mealie
+(recipe manager) on a Hetzner
 VPS (Debian 13, CPX31-class), single-node k3s, reconciled end-to-end by Flux CD
 from this repository.
 
-- **Domains:** `cloud.victorklomp.nl` (Nextcloud), `ha.victorklomp.nl` (Home Assistant), `sso.victorklomp.nl` (Pocket ID) — Let's Encrypt via cert-manager, HTTP-01 through Traefik
-- **Pins:** nextcloud **9.2.6** (app 34.0.3), home-assistant **0.3.80** (app 2026.9.1), cert-manager **v1.21.2** (charts); pocket-id image **v2.14.0**, oauth2-proxy image **v7.15.4** (both plain manifests, no official chart) — Renovate opens PRs for bumps
+- **Domains:** `cloud.victorklomp.nl` (Nextcloud), `ha.victorklomp.nl` (Home Assistant), `sso.victorklomp.nl` (Pocket ID), `recipes.victorklomp.nl` (Mealie) — Let's Encrypt via cert-manager, HTTP-01 through Traefik
+- **Pins:** nextcloud **9.2.6** (app 34.0.3), home-assistant **0.3.80** (app 2026.9.1), cert-manager **v1.21.2** (charts); pocket-id image **v2.14.0**, oauth2-proxy image **v7.15.4**, mealie image **v3.29.0** (all plain manifests, no official chart) — Renovate opens PRs for bumps
 - **Storage:** `local-path` (single node, no replicated storage) — PVC directories live on a dedicated **Hetzner Cloud Volume** mounted at `/var/lib/rancher/k3s/storage` (see Bootstrap §2)
 - **Secrets:** SOPS + age only, decrypted in-cluster by Flux; nothing plaintext in git
 - **Backups:** handled **outside this repo** by the operator (explicitly out of scope — see §Restore for what must be covered)
@@ -20,6 +21,8 @@ Internet ──443──► Traefik (k3s bundled, LoadBalancer)
                     │     └── PVC nextcloud-nextcloud (local-path, 150Gi — on the Cloud Volume)
                     ├─► oauth2-proxy (SSO gate: Pocket ID OIDC) ─► Home Assistant (ClusterIP; no DB, SQLite in its PVC)
                     │     └── PVC home-assistant-home-assistant-0 (local-path, 8Gi)
+                    ├─► Mealie (recipe manager; native OIDC login via Pocket ID, no password login)
+                    │     └── PVC mealie (local-path, 2Gi)
                     └─► Pocket ID (OIDC provider, passkeys; SQLite in its PVC)
                           └── PVC pocket-id (local-path, 1Gi)
 Admin ──Tailscale──► k3s API (6443) + SSH (22) — never public
@@ -36,19 +39,20 @@ infrastructure/                     # HelmRepositories, cert-manager (HelmReleas
 apps/nextcloud/                     # namespace, HelmRelease, SOPS secrets, import Job (suspended)
 apps/home-assistant/                # namespace, HelmRelease (chart ingress off; own Ingress routes via oauth2-proxy), oauth2-proxy Deployment/Service, SOPS secret (Pocket ID client credentials)
 apps/pocket-id/                     # namespace, plain Deployment/Service/PVC/Ingress (no official chart), SOPS secret (ENCRYPTION_KEY)
+apps/mealie/                        # namespace, plain Deployment/Service/PVC/Ingress (no official chart), SOPS secret (OIDC client credentials)
 ```
 
 ## Bootstrap (once)
 
 Order matters: the age key and encrypted secrets must exist **before the first
-push**, because `apps/nextcloud/kustomization.yaml` (and `apps/pocket-id/`)
-reference `secrets.sops.yaml` and Flux fails the `apps` Kustomization while it
-is missing.
+push**, because `apps/nextcloud/kustomization.yaml` (and `apps/pocket-id/`,
+`apps/mealie/`) reference `secrets.sops.yaml` and Flux fails the `apps`
+Kustomization while it is missing.
 
 ### 0. Prerequisites
 
 - Hetzner VPS (CAX11-class, Debian 13), SSH key only — done from the console.
-- DNS: `A` records `cloud.victorklomp.nl`, `ha.victorklomp.nl` and `sso.victorklomp.nl` → VPS IPv4 (and `AAAA` if you want v6).
+- DNS: `A` records `cloud.victorklomp.nl`, `ha.victorklomp.nl`, `sso.victorklomp.nl` and `recipes.victorklomp.nl` → VPS IPv4 (and `AAAA` if you want v6).
 - On your workstation: `flux`, `kubectl`, `sops`, `age` (e.g. via brew/apk/apt).
 - `git init -b main .` in this directory, and create the empty repo
   `SuperVK/fleet` on GitHub (no README/license — keep it empty).
@@ -155,14 +159,16 @@ kubectl create secret generic sops-age -n flux-system \
 ```bash
 flux get kustomizations -A          # all Ready=True
 kubectl get pods -n cert-manager    # 3 Running
-kubectl get certificate -A          # nextcloud-tls, home-assistant-tls, pocket-id-tls Ready=True
+kubectl get certificate -A          # nextcloud-tls, home-assistant-tls, pocket-id-tls, mealie-tls Ready=True
 kubectl get pods -n nextcloud       # nextcloud, mariadb, redis Running
 kubectl get pods -n home-assistant  # home-assistant-0, oauth2-proxy Running
 kubectl get pods -n pocket-id       # pocket-id Running
-kubectl get pvc -A                  # 4 Bound (nextcloud, mariadb, redis, HA) + pocket-id
+kubectl get pods -n mealie          # mealie Running
+kubectl get pvc -A                  # 5 Bound (nextcloud, mariadb, redis, HA, mealie) + pocket-id
 curl -I https://cloud.victorklomp.nl/status.php   # 200
 curl -I https://ha.victorklomp.nl                 # 302 to the Pocket ID login (see §Day-2: register the OIDC client first)
 curl -I https://sso.victorklomp.nl                # 200 (or 302 to /setup)
+curl -I https://recipes.victorklomp.nl            # 200 (Mealie login page; Pocket ID sign-in works after §Day-2)
 ```
 
 First reconcile takes a few minutes and happens in strict order:
@@ -186,6 +192,10 @@ Pocket ID: open https://sso.victorklomp.nl/setup — the first visit registers t
 admin passkey and claims the instance (same pattern as HA: no admin secret in
 git; the only secret is the SOPS `ENCRYPTION_KEY`). OIDC clients for other apps
 are then added in its admin UI.
+
+Mealie: the login page loads right away, but signing in needs the Pocket ID
+client registered first — see §Day-2 for the OIDC setup, which also includes
+neutralizing Mealie's seeded default account.
 
 
 ### 5. Admin access from your workstation (optional)
@@ -218,6 +228,10 @@ flux suspend helmrelease -n nextcloud nextcloud
 flux resume  helmrelease -n nextcloud nextcloud
 flux suspend helmrelease -n home-assistant home-assistant
 flux resume  helmrelease -n home-assistant home-assistant
+
+# mealie (plain manifests — deployment, no HelmRelease)
+kubectl logs -n mealie deploy/mealie --tail=100
+kubectl -n mealie rollout restart deploy/mealie
 ```
 
 Home Assistant day-2: config lives in its PVC (`/config`), not in git — edit
@@ -248,6 +262,45 @@ SOPS_AGE_KEY_FILE=age.agekey sops edit apps/home-assistant/secrets.sops.yaml
 Rotating `cookie-secret` only drops every active SSO session (users
 re-authenticate). Gate logs: `kubectl logs -n home-assistant deploy/oauth2-proxy`.
 
+**Mealie SSO (native OIDC via Pocket ID).** `recipes.victorklomp.nl` is Mealie
+with its built-in OIDC — no oauth2-proxy hop, Mealie speaks OIDC natively
+(Authorization Code + PKCE, confidential client). Password login is disabled
+(`ALLOW_PASSWORD_LOGIN=false` in `apps/mealie/deployment.yaml`), so every login
+is a Pocket ID passkey. All of this is one-time setup; the committed SOPS secret
+ships placeholders:
+
+```bash
+# 1. Pocket ID admin UI → create a group named `mealie-admins`
+#    (must match OIDC_ADMIN_GROUP in apps/mealie/deployment.yaml) and add your
+#    user to it — group members become Mealie admins on login. Make sure the
+#    user has "Email verified" on: Mealie requires the email_verified claim
+#    (log line: "[OIDC] email_verified claim is missing or false; refusing to
+#    authenticate"). Only if your Pocket ID version can't emit the claim at
+#    all: set OIDC_REQUIRES_EMAIL_VERIFICATION=false in deployment.yaml.
+# 2. Pocket ID admin UI → new OIDC client, confidential:
+#      callback URLs: https://recipes.victorklomp.nl/login
+#                     https://recipes.victorklomp.nl/login?direct=1
+#      scopes:        openid profile email
+# 3. Fill in the generated credentials:
+SOPS_AGE_KEY_FILE=age.agekey sops edit apps/mealie/secrets.sops.yaml
+#    (oidc-client-id / oidc-client-secret ← Pocket ID)
+# 4. Commit, push; Flux rolls the Deployment within 10m.
+# 5. Open https://recipes.victorklomp.nl → sign in with OIDC → passkey.
+#    Your user is auto-created and promoted to admin (mealie-admins member).
+# 6. Neutralize the seeded default account ("Change Me",
+#    changeme@example.com): Admin → Users → edit that user and set its
+#    Authentication Method to OIDC. Until then its public upstream default
+#    password still authenticates on /api/auth/token — upstream removed the
+#    env overrides for it in v1.4, so this step is the kill switch. Verify
+#    with: curl -s -X POST https://recipes.victorklomp.nl/api/auth/token \
+#    -d 'username=changeme@example.com&password=MyPassword'   # → 401
+```
+
+Mealie logs: `kubectl logs -n mealie deploy/mealie -f`. Data (SQLite DB,
+recipe images, auto-backup zips under `/app/data`) lives in the PVC; Mealie's
+own backups are zips in that same PVC — copy them off the node for real
+protection (§Restore).
+
 **Restoring a backup wipes the reverse-proxy trust.** An imported backup
 replaces `/config/.storage/http` with the source instance's settings, so
 `trusted_proxies` no longer covers the pod CIDR and every request through
@@ -261,7 +314,8 @@ kubectl --kubeconfig ~/.kube/fleet.yaml --insecure-skip-tls-verify delete pod -n
 ```
 
 Upgrades: Renovate pins `nextcloud 9.2.6` / `home-assistant 0.3.80` /
-`cert-manager v1.21.2` / `rclone/rclone:1.75.1` / `oauth2-proxy v7.15.4` and
+`cert-manager v1.21.2` / `rclone/rclone:1.75.1` / `oauth2-proxy v7.15.4` /
+`mealie v3.29.0` and
 opens PRs; merge when ready, Flux does the rest. Nextcloud majors (34 → 35)
 come through the chart bump — read the chart CHANGELOG before merging; the app
 runs `occ` upgrade hooks on container start. Home Assistant chart majors are
@@ -356,7 +410,10 @@ at minimum:
    clients, all encrypted at rest with the `ENCRYPTION_KEY` from the SOPS secret
    (which is in git). Losing that key invalidates every client credential, so
    the PVC and the repo secret must be restored as a pair,
-5. **This git repo** (GitHub) — the entire control plane is reproducible from it.
+5. **The Mealie PVC** `mealie` — SQLite DB, recipe images and Mealie's
+   auto-backup zips (`/app/data`); no pairing secret, the OIDC client
+   credentials live in git,
+6. **This git repo** (GitHub) — the entire control plane is reproducible from it.
 
 Full-cluster restore onto a fresh node:
 
@@ -420,6 +477,17 @@ Home Assistant (chart 0.3.80, values verified against its `values.yaml`):
 - **PVC name** is `home-assistant-home-assistant-0`: the chart's default controller is a StatefulSet, so `persistence.*` renders as a `volumeClaimTemplates` entry (claim `home-assistant` + pod `home-assistant-0`), not a standalone PVC.
 - **No SOPS secret needed** — the chart has no admin-credential injection; HA's onboarding creates the owner user on first visit and keeps it in the PVC.
 - **SQLite kept** (chart default) — the recorder on a single-instance HA with a few hundred entities is well within SQLite's envelope; a separate DB would be another stateful pod for no gain.
+
+Mealie (image v3.29.0, plain Kustomize manifests — no chart):
+
+- **No Helm chart on purpose** — same reasoning as Pocket ID: the published charts are community-maintained and unofficial; the app is a single container (Python API + prebuilt frontend, SQLite), so Deployment + Service + PVC + Ingress is the whole story. Renovate bumps the image (`docker.fileMatch` covers `apps/**/*.yaml`).
+- **Deployment, not StatefulSet** — one replica on an RWO local-path PVC; single node, StatefulSet buys nothing.
+- **Native OIDC instead of an oauth2-proxy gate** — Mealie speaks OIDC natively (Authorization Code + PKCE, confidential client per upstream docs), so no proxy sidecar; the client id/secret live in the SOPS `mealie` secret, and `BASE_URL` (verified: it drives the OIDC redirect URL, upstream #6995) must match the ingress host or Pocket ID rejects the callback.
+- **`OIDC_ADMIN_GROUP=mealie-admins`** — without an IdP-side admin signal, OIDC logins create plain members and the instance has no admin at all (the seeded default account is password-login only). Verified in `mealie/core/security/providers/openid_provider.py`: group members get `admin=true` at creation and on every re-login.
+- **`ALLOW_PASSWORD_LOGIN=false` + Day-2 kill switch** — since v1.4 the first user's credentials are hardcoded upstream defaults (`changeme@example.com` / `MyPassword`, no env override; verified `mealie/repos/seed/init_users.py` + settings), and hiding the password fields only changes the UI — `/api/auth/token` still accepts them. The Day-2 step (admin sets that account's Authentication Method to OIDC) is what actually rejects the password at the API level (the credentials provider refuses non-`MEALIE` auth methods).
+- **`HOST_IP=10.42.0.0/16`** — uvicorn's trusted proxy list for `X-Forwarded-*`; upstream default `*` trusts every connecting source (docs: "trusts forwarding headers from every connecting source"), and without the pin the OIDC redirect is built as `http`, which strict providers reject. Same pod-CIDR rationale as the Pocket ID `TRUST_PROXY` / Nextcloud `trusted_proxies`.
+- **Probes on `GET /api/app/about`** — the exact request the image's own `HEALTHCHECK` (`docker/healthcheck.sh`) makes; public route, no auth.
+- **PUID/PGID left at defaults (911)** — the entrypoint (`docker/entry.sh`) runs as root, `chown -R`s `/app` (including the PVC mount) to PUID:PGID and drops privileges via gosu; anything else would fight the local-path provisioner's root ownership on every boot.
 
 Infra-level decisions (not from any chart's values):
 

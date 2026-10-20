@@ -1,0 +1,25 @@
+# HTTPS for Mealie: the OIDC flow and passkeys at Pocket ID require secure
+# contexts; traefik + cert-manager provide it, same as the other apps.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mealie
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - recipes.victorklomp.nl
+      secretName: mealie-tls
+  rules:
+    - host: recipes.victorklomp.nl
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mealie
+                port:
+                  name: http
