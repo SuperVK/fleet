@@ -301,6 +301,18 @@ recipe images, auto-backup zips under `/app/data`) lives in the PVC; Mealie's
 own backups are zips in that same PVC — copy them off the node for real
 protection (§Restore).
 
+Troubleshooting admin promotion: admin status comes from the id_token `groups`
+claim (Pocket ID emits it only when the `groups` scope is granted — Mealie
+requests `openid email profile groups` by default), and the claim carries the
+Pocket ID group **name**, which must exactly equal `mealie-admins`. On every
+login Mealie re-syncs admin status from the claim — so once the group matches,
+the next passkey login promotes you; conversely a hand-promoted user is demoted
+back if the claim says otherwise. Mealie logs a warning when the claim is
+missing: `[OIDC] claims did not include a groups claim` — absence of that
+warning plus a non-admin login means the group **name** or **membership** in
+Pocket ID is off (there is no scope problem; if Pocket ID were too old to
+support the claim, the warning would appear).
+
 **Restoring a backup wipes the reverse-proxy trust.** An imported backup
 replaces `/config/.storage/http` with the source instance's settings, so
 `trusted_proxies` no longer covers the pod CIDR and every request through
