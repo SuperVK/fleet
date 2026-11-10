@@ -38,6 +38,10 @@ spec:
               value: https://chat.victorklomp.nl
             - name: DOMAIN_CLIENT
               value: https://chat.victorklomp.nl
+            # replicas: 1 — no Redis; assert the scheduler may arm in-process.
+            # Without this the schedules engine stays disarmed (writes 503).
+            - name: SCHEDULES_SINGLE_PROCESS
+              value: "true"
             # Personal instance: keep crawlers off the login page.
             - name: NO_INDEX
               value: "true"
