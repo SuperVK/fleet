@@ -1,0 +1,27 @@
+# Two volumes, matching upstream's Docker guidance:
+#   paseo           /home/paseo — daemon state, agent configs/credentials
+#                   (.omp, .claude, .codex …), installed agent CLIs
+#   paseo-workspace /workspace  — the code the agents read and write
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: paseo
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: paseo-workspace
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi

@@ -1,0 +1,175 @@
+# LibreChat — multi-provider chat UI (chat.victorklomp.nl).
+# Plain manifests: no official chart (upstream ships docker-compose only).
+# Single container (prebuilt SPA + Node API on :3080) + MongoDB — matches the
+# pocket-id/mealie pattern in this repo.
+# Env reference: https://www.librechat.ai/docs/configuration/dotenv/
+# Secrets (JWT/CREDS/OPENID) come from secrets.sops.yaml via secretKeyRef.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: librechat
+  labels:
+    app.kubernetes.io/name: librechat
+spec:
+  replicas: 1
+  # RWO PVC — replace in place, same rationale as the mongodb Deployment.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: librechat
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: librechat
+    spec:
+      containers:
+        - name: librechat
+          # Pinned (Docker Hub, multi-arch); Renovate bumps.
+          image: librechat/librechat:v0.8.8
+          env:
+            - name: HOST
+              # Default in the image is already 0.0.0.0; pinned for clarity.
+              value: 0.0.0.0
+            - name: MONGO_URI
+              value: mongodb://mongodb:27017/LibreChat
+            - name: DOMAIN_SERVER
+              # Public origin — builds auth callbacks and cookie settings.
+              value: https://chat.victorklomp.nl
+            - name: DOMAIN_CLIENT
+              value: https://chat.victorklomp.nl
+            # Personal instance: keep crawlers off the login page.
+            - name: NO_INDEX
+              value: "true"
+            # ---- Auth: Pocket ID OIDC only, no password accounts ----
+            # Hides the email/password form and rejects local credential logins.
+            - name: ALLOW_EMAIL_LOGIN
+              value: "false"
+            - name: ALLOW_REGISTRATION
+              value: "false"
+            # Enable the OIDC strategy; the client id/secret come from the SOPS
+            # secret. OPENID and SAML cannot disable only registration, so the
+            # first OIDC login auto-creates the account (ALLOW_SOCIAL_REGISTRATION).
+            - name: ALLOW_SOCIAL_LOGIN
+              value: "true"
+            - name: ALLOW_SOCIAL_REGISTRATION
+              value: "true"
+            - name: OPENID_ISSUER
+              # Pocket ID serves discovery at /.well-known/openid-configuration.
+              value: https://sso.victorklomp.nl
+            - name: OPENID_CALLBACK_URL
+              # Must match the callback URL registered on the Pocket ID client
+              # (README §Day-2).
+              value: /oauth/openid/callback
+            - name: OPENID_SCOPE
+              value: openid profile email
+            - name: OPENID_BUTTON_LABEL
+              value: Continue with Pocket ID
+            # false (default): the login page shows the Pocket ID button; set
+            # "true" to redirect straight to the passkey prompt instead.
+            - name: OPENID_AUTO_REDIRECT
+              value: "false"
+            - name: OPENID_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: librechat
+                  key: oidc-client-id
+            - name: OPENID_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: librechat
+                  key: oidc-client-secret
+            - name: OPENID_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: librechat
+                  key: openid-session-secret
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: librechat
+                  key: jwt-secret
+            - name: JWT_REFRESH_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: librechat
+                  key: jwt-refresh-secret
+            # AES-256-CBC key (64 hex chars) + IV (32 hex chars) encrypting
+            # stored provider credentials — generated at install time.
+            - name: CREDS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: librechat
+                  key: creds-key
+            - name: CREDS_IV
+              valueFrom:
+                secretKeyRef:
+                  name: librechat
+                  key: creds-iv
+            # ---- LLM endpoints ----
+            # "user_provided" = no admin-managed key; every signed-in user
+            # pastes their own API key in Settings. Replace the value with a
+            # real key in the SOPS secret (same key names) to make keys
+            # admin-managed instead.
+            - name: OPENAI_API_KEY
+              value: user_provided
+            - name: ANTHROPIC_API_KEY
+              value: user_provided
+            - name: GOOGLE_KEY
+              value: user_provided
+          ports:
+            - name: http
+              containerPort: 3080
+          # "/" serves the prebuilt SPA — proves the process is up.
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+          # /api/config is public and answers from app config (+ banner lookup);
+          # a 200 means the API is serving.
+          readinessProbe:
+            httpGet:
+              path: /api/config
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            # Same PVC at the three paths upstream's compose volumes bind:
+            # /app/data (temp credentials, file data), /app/uploads (user
+            # attachments), /app/client/public/images (generated images).
+            - name: data
+              mountPath: /app/data
+            - name: data
+              mountPath: /app/uploads
+            - name: data
+              mountPath: /app/client/public/images
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: librechat
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: librechat
+  labels:
+    app.kubernetes.io/name: librechat
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: librechat
+  ports:
+    - name: http
+      port: 3080
+      targetPort: http

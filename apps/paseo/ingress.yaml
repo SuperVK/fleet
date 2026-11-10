@@ -1,0 +1,26 @@
+# Owns paseo.victorklomp.nl. Routes everything through the oauth2-proxy SSO
+# gate (nothing on this host is public — the daemon executes code), same
+# shape as the home-assistant Ingress.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: paseo
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: traefik
+  tls:
+    - hosts:
+        - paseo.victorklomp.nl
+      secretName: paseo-tls
+  rules:
+    - host: paseo.victorklomp.nl
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: oauth2-proxy
+                port:
+                  name: http

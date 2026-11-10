@@ -1,12 +1,13 @@
-# fleet — Nextcloud + Home Assistant + Pocket ID + Mealie on single-node k3s + Flux CD (GitOps)
+# fleet — Nextcloud + Home Assistant + Pocket ID + Mealie + LibreChat + Paseo on single-node k3s + Flux CD (GitOps)
 
-Personal Nextcloud, Home Assistant, Pocket ID (passkey SSO/OIDC) and Mealie
-(recipe manager) on a Hetzner
+Personal Nextcloud, Home Assistant, Pocket ID (passkey SSO/OIDC), Mealie
+(recipe manager), LibreChat (multi-LLM chat UI) and Paseo (self-hosted
+coding-agent orchestrator) on a Hetzner
 VPS (Debian 13, CPX31-class), single-node k3s, reconciled end-to-end by Flux CD
 from this repository.
 
-- **Domains:** `cloud.victorklomp.nl` (Nextcloud), `ha.victorklomp.nl` (Home Assistant), `sso.victorklomp.nl` (Pocket ID), `recipes.victorklomp.nl` (Mealie) — Let's Encrypt via cert-manager, HTTP-01 through Traefik
-- **Pins:** nextcloud **9.2.6** (app 34.0.3), home-assistant **0.3.80** (app 2026.9.1), cert-manager **v1.21.2** (charts); pocket-id image **v2.14.0**, oauth2-proxy image **v7.15.4**, mealie image **v3.29.0** (all plain manifests, no official chart) — Renovate opens PRs for bumps
+- **Domains:** `cloud.victorklomp.nl` (Nextcloud), `ha.victorklomp.nl` (Home Assistant), `sso.victorklomp.nl` (Pocket ID), `recipes.victorklomp.nl` (Mealie), `chat.victorklomp.nl` (LibreChat), `paseo.victorklomp.nl` (Paseo, behind its own oauth2-proxy gate) — Let's Encrypt via cert-manager, HTTP-01 through Traefik
+- **Pins:** nextcloud **9.2.6** (app 34.0.3), home-assistant **0.3.80** (app 2026.9.1), cert-manager **v1.21.2** (charts); pocket-id image **v2.14.0**, oauth2-proxy image **v7.15.4**, mealie image **v3.29.0**, librechat image **v0.8.8** (with MongoDB **8.0.20**, the tag upstream's compose pins), paseo image **0.13.2** (all plain manifests, no official chart) — Renovate opens PRs for bumps
 - **Storage:** `local-path` (single node, no replicated storage) — PVC directories live on a dedicated **Hetzner Cloud Volume** mounted at `/var/lib/rancher/k3s/storage` (see Bootstrap §2)
 - **Secrets:** SOPS + age only, decrypted in-cluster by Flux; nothing plaintext in git
 - **Backups:** handled **outside this repo** by the operator (explicitly out of scope — see §Restore for what must be covered)
@@ -23,6 +24,12 @@ Internet ──443──► Traefik (k3s bundled, LoadBalancer)
                     │     └── PVC home-assistant-home-assistant-0 (local-path, 8Gi)
                     ├─► Mealie (recipe manager; native OIDC login via Pocket ID, no password login)
                     │     └── PVC mealie (local-path, 2Gi)
+                    ├─► LibreChat (multi-LLM chat UI; native OIDC login via Pocket ID)
+                    │     ├── MongoDB (ClusterIP; conversations/users/messages)
+                    │     │     └── PVC mongodb (local-path, 3Gi)
+                    │     └── PVC librechat (local-path, 5Gi — uploads/images/app data)
+                    ├─► oauth2-proxy (SSO gate: Pocket ID OIDC) ─► Paseo daemon (:6767; coding agents + bundled web UI)
+                    │     └── PVCs paseo (2Gi — daemon state, agent CLIs/creds) + paseo-workspace (10Gi — code)
                     └─► Pocket ID (OIDC provider, passkeys; SQLite in its PVC)
                           └── PVC pocket-id (local-path, 1Gi)
 Admin ──Tailscale──► k3s API (6443) + SSH (22) — never public
@@ -40,6 +47,8 @@ apps/nextcloud/                     # namespace, HelmRelease, SOPS secrets, impo
 apps/home-assistant/                # namespace, HelmRelease (chart ingress off; own Ingress routes via oauth2-proxy), oauth2-proxy Deployment/Service, SOPS secret (Pocket ID client credentials)
 apps/pocket-id/                     # namespace, plain Deployment/Service/PVC/Ingress (no official chart), SOPS secret (ENCRYPTION_KEY)
 apps/mealie/                        # namespace, plain Deployment/Service/PVC/Ingress (no official chart), SOPS secret (OIDC client credentials)
+apps/librechat/                     # namespace, plain Deployment/Service/PVC/Ingress + MongoDB (no official chart), SOPS secret (JWT/CREDS/OIDC secrets)
+apps/paseo/                         # namespace, plain Deployment/Service/PVCs/Ingress + oauth2-proxy gate (no official chart), SOPS secret (daemon password, OIDC client credentials)
 ```
 
 ## Bootstrap (once)
@@ -52,7 +61,7 @@ Kustomization while it is missing.
 ### 0. Prerequisites
 
 - Hetzner VPS (CAX11-class, Debian 13), SSH key only — done from the console.
-- DNS: `A` records `cloud.victorklomp.nl`, `ha.victorklomp.nl`, `sso.victorklomp.nl` and `recipes.victorklomp.nl` → VPS IPv4 (and `AAAA` if you want v6).
+- DNS: `A` records `cloud.victorklomp.nl`, `ha.victorklomp.nl`, `sso.victorklomp.nl`, `recipes.victorklomp.nl`, `chat.victorklomp.nl` and `paseo.victorklomp.nl` → VPS IPv4 (and `AAAA` if you want v6).
 - On your workstation: `flux`, `kubectl`, `sops`, `age` (e.g. via brew/apk/apt).
 - `git init -b main .` in this directory, and create the empty repo
   `SuperVK/fleet` on GitHub (no README/license — keep it empty).
@@ -159,22 +168,27 @@ kubectl create secret generic sops-age -n flux-system \
 ```bash
 flux get kustomizations -A          # all Ready=True
 kubectl get pods -n cert-manager    # 3 Running
-kubectl get certificate -A          # nextcloud-tls, home-assistant-tls, pocket-id-tls, mealie-tls Ready=True
+kubectl get certificate -A          # nextcloud-tls, home-assistant-tls, pocket-id-tls, mealie-tls, librechat-tls, paseo-tls Ready=True
 kubectl get pods -n nextcloud       # nextcloud, mariadb, redis Running
 kubectl get pods -n home-assistant  # home-assistant-0, oauth2-proxy Running
 kubectl get pods -n pocket-id       # pocket-id Running
 kubectl get pods -n mealie          # mealie Running
-kubectl get pvc -A                  # 5 Bound (nextcloud, mariadb, redis, HA, mealie) + pocket-id
+kubectl get pods -n librechat       # librechat, mongodb Running
+kubectl get pods -n paseo           # paseo (agents init container runs first), oauth2-proxy Running
+kubectl get pvc -A                  # 10 Bound (nextcloud, mariadb, redis, HA, mealie, librechat, mongodb, paseo, paseo-workspace) + pocket-id
 curl -I https://cloud.victorklomp.nl/status.php   # 200
 curl -I https://ha.victorklomp.nl                 # 302 to the Pocket ID login (see §Day-2: register the OIDC client first)
 curl -I https://sso.victorklomp.nl                # 200 (or 302 to /setup)
 curl -I https://recipes.victorklomp.nl            # 200 (Mealie login page; Pocket ID sign-in works after §Day-2)
+curl -I https://chat.victorklomp.nl               # 200/302 LibreChat login page; Pocket ID sign-in works after §Day-2
+curl -I https://paseo.victorklomp.nl              # 302 to the Pocket ID login (see §Day-2: register the OIDC client first)
 ```
 
 First reconcile takes a few minutes and happens in strict order:
 `infrastructure` (installs cert-manager + its CRDs) → `issuers` (the
 ClusterIssuer, which dry-run-fails until those CRDs exist — that's why it is a
-separate Kustomization with `dependsOn`) → `apps` (Nextcloud, Home Assistant, Pocket ID).
+separate Kustomization with `dependsOn`) → `apps` (Nextcloud, Home Assistant,
+Pocket ID, Mealie, LibreChat, Paseo).
 Co-locating the ClusterIssuer with the HelmRelease deadlocks: one dry-run
 failure aborts the whole Kustomization apply, so the HelmRelease that provides
 the CRDs never lands.
@@ -313,6 +327,100 @@ warning plus a non-admin login means the group **name** or **membership** in
 Pocket ID is off (there is no scope problem; if Pocket ID were too old to
 support the claim, the warning would appear).
 
+**LibreChat SSO (native OIDC via Pocket ID).** `chat.victorklomp.nl` is
+LibreChat with its built-in OpenID Connect — no oauth2-proxy hop; password
+accounts and signup are disabled (`ALLOW_EMAIL_LOGIN=false`,
+`ALLOW_REGISTRATION=false`), so every login is a Pocket ID passkey and the
+first OIDC login creates the account — and the **first user created becomes
+ADMIN** (verified in upstream `api/server/services/AuthService.js`: "Only the
+first user in the unscoped, single-tenant deployment bootstraps ADMIN").
+One-time setup (the committed SOPS secret ships CHANGE_ME placeholders):
+
+```bash
+# 1. Pocket ID admin UI (sso.victorklomp.nl) → new OIDC client, confidential:
+#      callback URL: https://chat.victorklomp.nl/oauth/openid/callback
+#      scopes:       openid profile email
+#    Make sure your user has "Email verified" on.
+# 2. Fill in the generated credentials:
+SOPS_AGE_KEY_FILE=age.agekey sops edit apps/librechat/secrets.sops.yaml
+#    (oidc-client-id / oidc-client-secret <- Pocket ID)
+# 3. Commit, push; Flux rolls the Deployment within 10m.
+# 4. Open https://chat.victorklomp.nl → "Continue with Pocket ID" → passkey.
+```
+
+LLM keys: the OpenAI / Anthropic / Google endpoints ship as `user_provided`
+in `apps/librechat/deployment.yaml` — each user pastes their own API key in
+Settings → Data controls / endpoints. For admin-managed keys instead, put the
+key in the SOPS secret (e.g. `openai-api-key: sk-...`) and switch the env var
+to a `secretKeyRef`. Message search (Meilisearch) and file RAG (pgvector +
+rag_api) are intentionally not deployed — lean personal instance; both are
+optional upstream services.
+
+Day-2 commands:
+
+```bash
+kubectl logs -n librechat deploy/librechat --tail=100
+kubectl -n librechat rollout restart deploy/librechat
+kubectl exec -it -n librechat deploy/mongodb -- mongosh LibreChat
+```
+
+MongoDB runs `--noauth` (upstream's own compose default) on ClusterIP only —
+the same trust level as Nextcloud's Redis cache; nothing outside the cluster
+can reach it.
+
+**Paseo (self-hosted coding-agent orchestrator).** `paseo.victorklomp.nl`
+serves the daemon's bundled web UI behind the oauth2-proxy + Pocket ID gate
+(same pattern as the Home Assistant gate, minus the `/api/` bypass — the
+daemon executes code, so nothing on this host bypasses the passkey check).
+The daemon's own password stays enabled as the second layer; the web UI asks
+for it once per browser when connecting. One-time setup (the committed SOPS
+secret ships CHANGE_ME placeholders):
+
+```bash
+# 1. Pocket ID admin UI → new OIDC client, confidential:
+#      callback URL: https://paseo.victorklomp.nl/oauth2/callback
+#      scopes:       openid profile email
+# 2. Fill in the generated credentials:
+SOPS_AGE_KEY_FILE=age.agekey sops edit apps/paseo/secrets.sops.yaml
+#    (client-id / client-secret <- Pocket ID)
+# 3. Commit, push; Flux rolls oauth2-proxy within 10m.
+# 4. Open https://paseo.victorklomp.nl → Pocket ID passkey → daemon password
+#    (read it: SOPS_AGE_KEY_FILE=age.agekey sops -d apps/paseo/secrets.sops.yaml)
+```
+
+Agents: the init container installs **Oh My Pi** (`@oh-my-pi/pi-coding-agent`,
+`omp` on PATH) into the paseo PVC at every pod start; Paseo has a first-class
+`omp` provider but ships it disabled — enable it once in the web UI (Settings
+→ Providers / provider catalog → "Oh My Pi"). Authenticate `omp` (and any
+other agent CLI) inside the pod; credentials persist in the PVC:
+
+```bash
+kubectl exec -it -n paseo deploy/paseo -- gosu paseo omp
+```
+
+More agent CLIs: add npm packages to the init container's install list in
+`apps/paseo/deployment.yaml` and push. Upstream's alternative is a child image
+(`FROM ghcr.io/getpaseo/paseo`, `docker/Dockerfile.agents.example`) — that
+means building/pushing an image outside this repo; the init container keeps it
+in git. `gh` (used for PR-aware worktrees) is not bundled — install it
+persistently via the same path if you need it. The desktop/mobile apps pair
+with the daemon through Paseo's end-to-end-encrypted relay
+(paseo.sh/docs/connectivity); the web UI path is the one above.
+
+Code lives in the `paseo-workspace` PVC (mounted at `/workspace`) — clone
+repos via the UI's terminal or `kubectl exec`; deleting the workspace PVC
+deletes the code. Restarting the pod (`kubectl -n paseo rollout restart
+deploy/paseo`) kills running agent sessions; state and credentials persist.
+
+Day-2 commands:
+
+```bash
+kubectl logs -n paseo deploy/paseo -c paseo --tail=100      # daemon (JSON logs)
+kubectl logs -n paseo deploy/oauth2-proxy --tail=100        # SSO gate
+kubectl -n paseo rollout restart deploy/paseo
+```
+
+
 **Restoring a backup wipes the reverse-proxy trust.** An imported backup
 replaces `/config/.storage/http` with the source instance's settings, so
 `trusted_proxies` no longer covers the pod CIDR and every request through
@@ -327,7 +435,7 @@ kubectl --kubeconfig ~/.kube/fleet.yaml --insecure-skip-tls-verify delete pod -n
 
 Upgrades: Renovate pins `nextcloud 9.2.6` / `home-assistant 0.3.80` /
 `cert-manager v1.21.2` / `rclone/rclone:1.75.1` / `oauth2-proxy v7.15.4` /
-`mealie v3.29.0` and
+`mealie v3.29.0` / `librechat v0.8.8` / `mongo 8.0.20` / `paseo 0.13.2` and
 opens PRs; merge when ready, Flux does the rest. Nextcloud majors (34 → 35)
 come through the chart bump — read the chart CHANGELOG before merging; the app
 runs `occ` upgrade hooks on container start. Home Assistant chart majors are
@@ -425,7 +533,14 @@ at minimum:
 5. **The Mealie PVC** `mealie` — SQLite DB, recipe images and Mealie's
    auto-backup zips (`/app/data`); no pairing secret, the OIDC client
    credentials live in git,
-6. **This git repo** (GitHub) — the entire control plane is reproducible from it.
+6. **The LibreChat PVCs** `librechat` (uploads/generated images/app data) and
+   `mongodb` (conversations, users, messages — `mongodump` it, or a file-level
+   copy while the pod is stopped; all app secrets live SOPS-encrypted in git),
+7. **The Paseo PVCs** `paseo` (daemon state + agent configs/credentials —
+   losing it means re-authenticating the agent CLIs; the daemon password and
+   OIDC creds are in git) and `paseo-workspace` (the checked-out code the
+   agents work on),
+8. **This git repo** (GitHub) — the entire control plane is reproducible from it.
 
 Full-cluster restore onto a fresh node:
 
@@ -500,6 +615,28 @@ Mealie (image v3.29.0, plain Kustomize manifests — no chart):
 - **`HOST_IP=10.42.0.0/16`** — uvicorn's trusted proxy list for `X-Forwarded-*`; upstream default `*` trusts every connecting source (docs: "trusts forwarding headers from every connecting source"), and without the pin the OIDC redirect is built as `http`, which strict providers reject. Same pod-CIDR rationale as the Pocket ID `TRUST_PROXY` / Nextcloud `trusted_proxies`.
 - **Probes on `GET /api/app/about`** — the exact request the image's own `HEALTHCHECK` (`docker/healthcheck.sh`) makes; public route, no auth.
 - **PUID/PGID left at defaults (911)** — the entrypoint (`docker/entry.sh`) runs as root, `chown -R`s `/app` (including the PVC mount) to PUID:PGID and drops privileges via gosu; anything else would fight the local-path provisioner's root ownership on every boot.
+
+LibreChat (image v0.8.8, plain Kustomize manifests — no chart):
+
+- **No Helm chart on purpose** — upstream ships docker-compose only; the published charts are community-maintained and unofficial. Renovate bumps the image (`docker.fileMatch` covers `apps/**/*.yaml`); the image is multi-arch (node:24 alpine base).
+- **Bundled MongoDB 8.0.20, `--noauth` like upstream's compose, ClusterIP only** — same trust level as Nextcloud's Redis cache: nothing outside the cluster can reach it. Auth was skipped deliberately: the upstream compose ships noauth, and a root user + authSource wiring buys little on a single-node, non-exposed instance.
+- **`CREDS_KEY`/`CREDS_IV` lengths verified in source** (`packages/data-schemas/src/crypto/index.ts`): both are hex-decoded into an AES-CBC key/IV — 32 bytes key = 64 hex chars, 16 bytes IV = 32 hex chars; JWT/CREDS/session secrets are all generated at install time in the SOPS secret (upstream would otherwise persist throwaway temp credentials in `/app/data/.env.temp`).
+- **OIDC with Pocket ID** — LibreChat's OpenID strategy is a generic OIDC issuer client (`OPENID_ISSUER` points at `sso.victorklomp.nl`); password login + registration disabled; first OIDC login auto-creates the account and the **first user becomes ADMIN** (verified `AuthService.js`). `OPENID_CALLBACK_URL=/oauth/openid/callback` (the upstream default, must match the Pocket ID client's registered callback).
+- **Endpoints left on `user_provided`** — OpenAI/Anthropic/Google env values are the literal `user_provided` (upstream's own example default): every signed-in user pastes their key in the UI; no secrets needed in git. Real admin-managed keys swap the env for a secretKeyRef.
+- **One PVC, three mounts** — upstream's compose binds `/app/data`, `/app/uploads`, `/app/client/public/images`; the same volume is mounted at all three paths (separate subdirectories, no overlap) so uploads/generated images survive pod replacement.
+- **Probes:** liveness `GET /` (the SPA proves the process serves), readiness `GET /api/config` (public route, app config) — the image ships no healthcheck and there is no dedicated `/api/health`.
+- **Meilisearch (message search) and the RAG stack (pgvector + rag_api) not deployed** — optional upstream services, off for a lean personal instance (`SEARCH=false` is the app default).
+
+Paseo (image 0.13.2, plain Kustomize manifests — no chart):
+
+- **No chart exists** — upstream ships docker + npm daemon installs. Renovate bumps the image; multi-arch (amd64/arm64) verified on ghcr.
+- **Agent CLIs via init container, not a child image** — the image deliberately ships no agent CLIs; upstream's answer is `FROM ghcr.io/getpaseo/paseo` child images you build+push yourself (outside git). The init container instead runs `npm install -g --prefix /home/paseo/.npm-global` (on the PVC, so installs survive pod replacement) and the daemon's `PATH` is prepended with that bin dir — same pinned image for daemon and installer, all in git. Tradeoff: reinstall on every pod start (~a minute), vs. child-image churn.
+- **Paseo has a first-class `omp` provider** (`packages/protocol/src/provider-manifest.ts`, id `omp`), shipped `enabledByDefault: false` — enable once in the web UI provider catalog; the binary is discovered via PATH (minimum omp version 16.3.9, verified in `provider-config.ts`).
+- **`PASEO_HOSTNAMES=paseo.victorklomp.nl`** — the daemon's DNS-rebinding protection rejects hosts not on the allowlist; the public domain must be listed (upstream docs).
+- **`PASEO_TRUSTED_PROXIES=10.42.0.0/16`** — forwarded headers (X-Forwarded-Proto) are only trusted from listed proxies; both hops (Traefik, oauth2-proxy) sit in the pod CIDR. Without it the web UI builds `ws://` connect URLs and the browser blocks them as mixed content.
+- **Gate = the proven home-assistant oauth2-proxy pattern, minus the `/api/` bypass** — the daemon executes code, so every route requires a Pocket ID passkey; the daemon password (`PASEO_PASSWORD`, generated in the SOPS secret) stays on as the second layer. The UI static page loads unauthenticated by upstream design; the API/WebSocket don't.
+- **Probes on `GET /api/health`** — the exact check the image's own HEALTHCHECK runs.
+- **Two PVCs per upstream's Docker doc**: `/home/paseo` (daemon state, agent configs/credentials, installed CLIs) and `/workspace` (code). The image entrypoint drops the daemon to its non-root `paseo` user (uid 1000) via gosu, so containers run as root by image design.
 
 Infra-level decisions (not from any chart's values):
 

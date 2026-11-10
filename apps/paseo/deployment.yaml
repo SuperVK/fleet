@@ -1,0 +1,134 @@
+# Paseo daemon (paseo.victorklomp.nl) — orchestrates coding agents and serves
+# the bundled browser web UI from the same HTTP origin (:6767, API + /ws).
+# Plain manifests: no chart exists. Upstream deployment shape:
+# https://paseo.sh/docs/docker
+#
+# The image does NOT bundle agent CLIs — upstream suggests a child image
+# (docker/Dockerfile.agents.example), but that means build+push outside git.
+# Instead the init container installs agent CLIs from npm into
+# /home/paseo/.npm-global (on the paseo PVC, so installs survive restarts)
+# and the daemon's PATH is prepended with that bin dir. Adding/removing an
+# agent = edit the package list below; bumping the image tag reinstalls
+# agents against the new release.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: paseo
+  labels:
+    app.kubernetes.io/name: paseo
+spec:
+  replicas: 1
+  # RWO PVCs — replace in place, same rationale as librechat/mongodb.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: paseo
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: paseo
+    spec:
+      initContainers:
+        - name: agents
+          # Same pinned image as the daemon (it bundles npm — node:22 base).
+          # Runs as root; ownership is fixed for the non-root `paseo` user the
+          # daemon entrypoint drops to (uid/gid 1000).
+          image: ghcr.io/getpaseo/paseo:0.13.2
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              npm install -g --prefix /home/paseo/.npm-global \
+                @oh-my-pi/pi-coding-agent
+              chown -R 1000:1000 /home/paseo/.npm-global
+          volumeMounts:
+            - name: home
+              mountPath: /home/paseo
+      containers:
+        - name: paseo
+          # Pinned; Renovate bumps (multi-arch image, arm64 included).
+          # Runs as root by image design: the entrypoint prepares mounted
+          # volumes, then gosu-drops the daemon and launched agents to the
+          # non-root `paseo` user (uid/gid 1000).
+          image: ghcr.io/getpaseo/paseo:0.13.2
+          env:
+            - name: PASEO_PASSWORD
+              # Daemon password — required for any network-reachable daemon
+              # (the entrypoint refuses to warn-free start without it). The
+              # web UI asks for it once per browser when connecting.
+              valueFrom:
+                secretKeyRef:
+                  name: paseo
+                  key: password
+            - name: PASEO_HOSTNAMES
+              # DNS-rebinding protection allowlist — the daemon rejects
+              # requests for hosts not listed here (IPs/localhost are allowed
+              # by default; the public domain must be listed).
+              value: paseo.victorklomp.nl
+            - name: PASEO_TRUSTED_PROXIES
+              # The web UI derives its connect scheme (wss://) from
+              # X-Forwarded-Proto, which is only trusted from listed proxies.
+              # Both hops (Traefik, oauth2-proxy) sit in the pod CIDR; without
+              # this the UI falls back to ws:// and the browser blocks it as
+              # mixed content.
+              value: 10.42.0.0/16
+            - name: PATH
+              # Prepend the init container's agent-CLI install dir (on the
+              # PVC) so the daemon finds `omp` etc. Rest is the standard
+              # Debian root PATH of the node:22 base image.
+              value: /home/paseo/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+          ports:
+            - name: http
+              containerPort: 6767
+          # Same check as the image's own HEALTHCHECK: GET /api/health.
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+          # Agents are child processes of this container — the limits are
+          # shared with every running agent, so memory is generous and CPU is
+          # capped rather than throttled harder.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: home
+              mountPath: /home/paseo
+            - name: workspace
+              mountPath: /workspace
+      volumes:
+        - name: home
+          persistentVolumeClaim:
+            claimName: paseo
+        - name: workspace
+          persistentVolumeClaim:
+            claimName: paseo-workspace
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: paseo
+  labels:
+    app.kubernetes.io/name: paseo
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: paseo
+  ports:
+    - name: http
+      port: 6767
+      targetPort: http

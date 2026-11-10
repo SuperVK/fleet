@@ -1,0 +1,126 @@
+# oauth2-proxy gates paseo.victorklomp.nl behind Pocket ID (standard OIDC
+# provider; discovery at https://sso.victorklomp.nl/.well-known/openid-configuration)
+# before traffic reaches the Paseo daemon. Same proven pattern as the
+# home-assistant gate, minus the /api/ bypass: EVERYTHING on this host is
+# gated — the daemon executes code, so no route reaches it without a Pocket
+# ID passkey session. The daemon's own password (PASEO_PASSWORD in the paseo
+# SOPS secret) stays enabled as the second layer.
+#
+# Flow: Traefik -> oauth2-proxy (:4180) -> paseo (:6767).
+# - /oauth2/* (start / callback / sign_out) and /ping are served by
+#   oauth2-proxy itself, never proxied upstream.
+# - /ws WebSocket upgrades pass through oauth2-proxy untouched; Traefik
+#   terminates TLS and sets X-Forwarded-Proto: https, so the web UI connects
+#   back over wss:// (paseo trusts the hop via PASEO_TRUSTED_PROXIES).
+# - Pocket ID side: add an OIDC client in its admin UI with callback URL
+#   https://paseo.victorklomp.nl/oauth2/callback; its id/secret live in the
+#   SOPS secret (secrets.sops.yaml.example documents the flow).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oauth2-proxy
+  labels:
+    app.kubernetes.io/name: oauth2-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: oauth2-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: oauth2-proxy
+    spec:
+      containers:
+        - name: oauth2-proxy
+          # Pinned; Renovate bumps (multi-arch image). Same version as the
+          # home-assistant gate.
+          image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.4
+          # Flags via args, not OAUTH2_PROXY_* env — the env names for
+          # repeatable (slice) flags are not documented, args are explicit.
+          args:
+            # v7.15 changed the default http-address to 127.0.0.1:4180:
+            # loopback-only inside the container, so the pod IP never answers
+            # (probes refused, Traefik sees no endpoints, 503 "no available
+            # server"). Bind all interfaces explicitly.
+            - --http-address=0.0.0.0:4180
+            # Only Traefik (pod CIDR) may supply X-Forwarded-* headers; the
+            # default trusts 0.0.0.0/0 for backwards compatibility.
+            - --trusted-proxy-ip=10.42.0.0/16
+            # Pocket ID advertises PKCE S256 — use it instead of skipping it.
+            - --code-challenge-method=S256
+          env:
+            - name: OAUTH2_PROXY_PROVIDER
+              value: oidc
+            - name: OAUTH2_PROXY_OIDC_ISSUER_URL
+              value: https://sso.victorklomp.nl
+            - name: OAUTH2_PROXY_UPSTREAMS
+              value: http://paseo.paseo.svc.cluster.local:6767
+            - name: OAUTH2_PROXY_REDIRECT_URL
+              value: https://paseo.victorklomp.nl/oauth2/callback
+            # Traefik terminates TLS and sets X-Forwarded-*; trust it. Both
+            # hops (Traefik, oauth2-proxy) run inside 10.42.0.0/16, the pod
+            # CIDR paseo trusts as proxies.
+            - name: OAUTH2_PROXY_REVERSE_PROXY
+              value: "true"
+            - name: OAUTH2_PROXY_COOKIE_SECURE
+              value: "true"
+            # Personal instance: every Pocket ID user may pass the gate.
+            - name: OAUTH2_PROXY_EMAIL_DOMAINS
+              value: "*"
+            # Never forward a Basic-auth Authorization header upstream — the
+            # daemon password is entered in its own UI, not via headers.
+            - name: OAUTH2_PROXY_PASS_BASIC_AUTH
+              value: "false"
+            - name: OAUTH2_PROXY_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: paseo
+                  key: client-id
+            - name: OAUTH2_PROXY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: paseo
+                  key: client-secret
+            - name: OAUTH2_PROXY_COOKIE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: paseo
+                  key: cookie-secret
+          ports:
+            - name: http
+              containerPort: 4180
+          # /ping is oauth2-proxy's documented unauthenticated health endpoint.
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oauth2-proxy
+  labels:
+    app.kubernetes.io/name: oauth2-proxy
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: oauth2-proxy
+  ports:
+    - name: http
+      port: 4180

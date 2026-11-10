@@ -1,0 +1,15 @@
+# Uploaded files (user attachments + generated images) and app data (temp
+# credential store, fileStrategy data) — one volume, mounted at the three
+# paths upstream's compose binds (see deployment.yaml). Chat history lives in
+# MongoDB (its own PVC), not here.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: librechat
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
