@@ -25,7 +25,9 @@ spec:
         - name: mongodb
           # Same tag upstream's docker-compose pins; multi-arch (amd64/arm64).
           image: mongo:8.0.20
-          command: ["mongod", "--noauth"]
+          # --bind_ip_all: mongo 8 binds 127.0.0.1 by default, which refuses
+          # every connection to the pod/service IP (librechat: ECONNREFUSED).
+          command: ["mongod", "--noauth", "--bind_ip_all"]
           ports:
             - name: mongodb
               containerPort: 27017
