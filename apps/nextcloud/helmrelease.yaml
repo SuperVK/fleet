@@ -99,6 +99,17 @@ spec:
         # secrets.sops.yaml).
         existingSecret: nextcloud-mariadb
       primary:
+        # Chart defaults request 500m CPU; on the single 2-core node that
+        # starves paseo/librechat (scheduler rejects: Insufficient cpu).
+        resources:
+          requests:
+            cpu: 100m
+            memory: 512Mi
+            ephemeral-storage: 50Mi
+          limits:
+            cpu: 750m
+            memory: 768Mi
+            ephemeral-storage: 2Gi
         persistence:
           enabled: true
           storageClass: local-path
