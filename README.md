@@ -47,7 +47,7 @@ apps/nextcloud/                     # namespace, HelmRelease, SOPS secrets, impo
 apps/home-assistant/                # namespace, HelmRelease (chart ingress off; own Ingress routes via oauth2-proxy), oauth2-proxy Deployment/Service, SOPS secret (Pocket ID client credentials)
 apps/pocket-id/                     # namespace, plain Deployment/Service/PVC/Ingress (no official chart), SOPS secret (ENCRYPTION_KEY)
 apps/mealie/                        # namespace, plain Deployment/Service/PVC/Ingress (no official chart), SOPS secret (OIDC client credentials)
-apps/librechat/                     # namespace, plain Deployment/Service/PVC/Ingress + MongoDB (no official chart), SOPS secret (JWT/CREDS/OIDC secrets)
+apps/librechat/                     # namespace, plain Deployment/Service/PVC/Ingress + MongoDB (no official chart), ConfigMap (librechat.yaml), SOPS secret (JWT/CREDS/OIDC/OpenRouter key)
 apps/paseo/                         # namespace, plain Deployment/Service/PVCs/Ingress + oauth2-proxy gate (no official chart), SOPS secret (daemon password, OIDC client credentials)
 ```
 
@@ -343,7 +343,8 @@ One-time setup (the committed SOPS secret ships CHANGE_ME placeholders):
 #    Make sure your user has "Email verified" on.
 # 2. Fill in the generated credentials:
 SOPS_AGE_KEY_FILE=age.agekey sops edit apps/librechat/secrets.sops.yaml
-#    (oidc-client-id / oidc-client-secret <- Pocket ID)
+#    (oidc-client-id / oidc-client-secret <- Pocket ID; openrouter-key <-
+#     an openrouter.ai API key, for the OpenRouter endpoint in the chat UI)
 # 3. Commit, push; Flux rolls the Deployment within 10m.
 # 4. Open https://chat.victorklomp.nl → "Continue with Pocket ID" → passkey.
 ```
@@ -352,7 +353,12 @@ LLM keys: the OpenAI / Anthropic / Google endpoints ship as `user_provided`
 in `apps/librechat/deployment.yaml` — each user pastes their own API key in
 Settings → Data controls / endpoints. For admin-managed keys instead, put the
 key in the SOPS secret (e.g. `openai-api-key: sk-...`) and switch the env var
-to a `secretKeyRef`. Message search (Meilisearch) and file RAG (pgvector +
+to a `secretKeyRef`. OpenRouter already works that way:
+`apps/librechat/config.yaml` (ConfigMap, mounted as `/app/librechat.yaml`)
+defines the custom OpenRouter endpoint with `apiKey: "${OPENROUTER_KEY}"`,
+filled from the SOPS secret's `openrouter-key`; subPath mounts don't hot-reload,
+so `kubectl -n librechat rollout restart deploy/librechat` after a key/config
+change. Message search (Meilisearch) and file RAG (pgvector +
 rag_api) are intentionally not deployed — lean personal instance; both are
 optional upstream services.
 

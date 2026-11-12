@@ -1,0 +1,31 @@
+# librechat.yaml (https://www.librechat.ai/docs/configuration/librechat_yaml/),
+# mounted read-only at /app/librechat.yaml — the image's default config path,
+# so no CONFIG_PATH override is needed. LibreChat interpolates ${VARS} from
+# the pod env at startup (OPENROUTER_KEY comes from the SOPS secret).
+#
+# subPath file mounts never pick up ConfigMap changes — after editing:
+#   kubectl -n librechat rollout restart deploy/librechat
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: librechat-config
+  namespace: librechat
+data:
+  librechat.yaml: |
+    version: 1.3.5
+    cache: true
+    endpoints:
+      custom:
+        - name: "OpenRouter"
+          apiKey: "${OPENROUTER_KEY}"
+          baseURL: "https://openrouter.ai/api/v1"
+          models:
+            default: ["z-ai/glm-5.3-flash"]
+            fetch: true
+          titleConvo: true
+          titleModel: "z-ai/glm-5.3-flash"
+          dropParams: ["stop"]
+          modelDisplayLabel: "OpenRouter"
+          addParams:
+            reasoning:
+              effort: "low"

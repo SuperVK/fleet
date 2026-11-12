@@ -121,6 +121,15 @@ spec:
               value: user_provided
             - name: GOOGLE_KEY
               value: user_provided
+            # OpenRouter is admin-managed: librechat.yaml (ConfigMap) sets
+            # apiKey: "${OPENROUTER_KEY}" for its custom endpoint, and this
+            # env var fills that in from the SOPS secret. The OpenAI/
+            # Anthropic/Google endpoints above stay user_provided.
+            - name: OPENROUTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: librechat
+                  key: openrouter-key
           ports:
             - name: http
               containerPort: 3080
@@ -158,10 +167,19 @@ spec:
               mountPath: /app/uploads
             - name: data
               mountPath: /app/client/public/images
+            # librechat.yaml from the librechat-config ConfigMap (subPath,
+            # read-only; needs a rollout restart after ConfigMap edits).
+            - name: config
+              mountPath: /app/librechat.yaml
+              subPath: librechat.yaml
+              readOnly: true
       volumes:
         - name: data
           persistentVolumeClaim:
             claimName: librechat
+        - name: config
+          configMap:
+            name: librechat-config
 ---
 apiVersion: v1
 kind: Service
