@@ -99,6 +99,19 @@ spec:
         # secrets.sops.yaml).
         existingSecret: nextcloud-mariadb
       primary:
+        # 2026-11-12: during the import the node disk squeezed transiently and
+        # fsyncs stalled; mariadb-admin ping missed its 1s exec probe timeout
+        # and kubelet SIGTERM'd a healthy DB (clean shutdown). 5s keeps a
+        # transient stall from restarting the database.
+        livenessProbe:
+          timeoutSeconds: 5
+        readinessProbe:
+          timeoutSeconds: 5
+        # ibtmp1 (InnoDB temp tablespace) is unbounded by default; heavy
+        # filecache scan queries can grow it to disk-filling size on the
+        # shared 99G node disk. Cap it — oversized queries fail with an error
+        # instead of taking the node's storage down.
+        extraFlags: "--innodb_temp_data_file_path=ibtmp1:12M:autoextend:max:2G"
         # Chart defaults request 500m CPU; on the single 2-core node that
         # starves paseo/librechat (scheduler rejects: Insufficient cpu).
         resources:
@@ -120,6 +133,13 @@ spec:
       # Vendored bitnami chart defaults to replication (master + 3 replicas)
       # — pointless on a single node. One master, cache only.
       architecture: standalone
+      # Redis holds locks/sessions only — nothing worth replaying after a
+      # restart. The default commonConfiguration enables AOF, which journaled
+      # every cache write to the shared node disk; a transient disk squeeze
+      # then failed AOF fsyncs and Nextcloud 500'd everything with MISCONF
+      # (2026-11-12). Persist nothing.
+      commonConfiguration: |-
+        appendonly no
       auth:
         existingSecret: nextcloud-redis
         existingSecretPasswordKey: redis-password
