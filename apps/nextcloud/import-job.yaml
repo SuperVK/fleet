@@ -39,7 +39,11 @@ spec:
               # --ignore-case: OneDrive stores most files as .JPG (uppercase);
               # a case-sensitive include matched only ~35% of the set and still
               # exited 0. rclone's glob is case-sensitive by default.
+              # raw day (32 GiB, 5k files) is unwanted: excluded at the root
+              # so rclone never even lists it.
               rclone copy "onedrive:Photography/2. Export" "/data/data/victor@vtkl.nl/files/Photography" \
+                --exclude "/2022/NSTC springen/raw day/**" \
+                --exclude "/2022/NSTC springen/raw day/" \
                 --include "*.{jpg,jpeg,png,heic,heif,webp,tif,tiff,gif}" \
                 --ignore-case \
                 --transfers 4 --checkers 8 --tpslimit 8 \
