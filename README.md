@@ -450,19 +450,23 @@ The pod template hash includes configs/phpConfigs, so pods roll on config change
 1. Edit `apps/nextcloud/import-job.yaml`: set `CHANGE_ME_USER` and the
    `onedrive:` source path; commit; wait for `flux get kustomizations` to go
    Ready.
-2. Run the job (it is committed suspended on purpose):
+2. The Job is committed with `suspend: false`, so Flux starts it on the first
+   `apps` reconcile after the push. Watch:
 
    ```bash
-   kubectl patch -n nextcloud job onedrive-import -p '{"spec":{"suspend":false}}'
    kubectl logs -n nextcloud job/onedrive-import -f
    ```
 
-   Changed the Job spec after a previous run? Delete it first
-   (`kubectl -n nextcloud delete job onedrive-import`) and let Flux recreate it:
-   `spec.template` is immutable on existing Jobs, and until the stale one is
-   gone Flux fails every `apps` reconcile with a dry-run Invalid error — which
-   also blocks other objects (e.g. an updated `rclone-config` secret) from
-   applying.
+   Never resume the Job with `kubectl patch … '{"spec":{"suspend":false}}'`:
+   git declares it suspended in that case, Flux reverts the field on the next
+   10-minute reconcile, and Kubernetes deletes all running pods when a Job is
+   suspended — the copy then keeps stopping a few minutes in. Spec changes go
+   through git instead. If the Job already exists with an old template, delete
+   it first (`kubectl -n nextcloud delete job onedrive-import`) and let Flux
+   recreate it: `spec.template` is immutable on existing Jobs, and until the
+   stale one is gone Flux fails every `apps` reconcile with a dry-run Invalid
+   error — which also blocks other objects (e.g. an updated `rclone-config`
+   secret) from applying.
 
    `rclone copy` (never `sync`) — non-destructive on both ends.
 3. Make Nextcloud see the files:
