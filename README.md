@@ -229,9 +229,9 @@ kubectl --kubeconfig ~/.kube/fleet.yaml get nodes
 flux reconcile kustomization --with-source infrastructure
 flux reconcile kustomization --with-source apps
 
-# occ (official image ships an occ wrapper that drops to www-data)
-kubectl exec -n nextcloud deploy/nextcloud -c nextcloud -- occ status
-kubectl exec -n nextcloud deploy/nextcloud -c nextcloud -- occ files:scan --all
+# occ — the fpm image ships no `occ` wrapper on PATH; invoke via php
+kubectl exec -n nextcloud deploy/nextcloud -c nextcloud -- php occ status
+kubectl exec -n nextcloud deploy/nextcloud -c nextcloud -- php occ files:scan --all
 
 # logs
 kubectl logs -n nextcloud deploy/nextcloud -c nextcloud --tail=100
@@ -457,14 +457,23 @@ The pod template hash includes configs/phpConfigs, so pods roll on config change
    kubectl logs -n nextcloud job/onedrive-import -f
    ```
 
+   Changed the Job spec after a previous run? Delete it first
+   (`kubectl -n nextcloud delete job onedrive-import`) and let Flux recreate it:
+   `spec.template` is immutable on existing Jobs, and until the stale one is
+   gone Flux fails every `apps` reconcile with a dry-run Invalid error — which
+   also blocks other objects (e.g. an updated `rclone-config` secret) from
+   applying.
+
    `rclone copy` (never `sync`) — non-destructive on both ends.
 3. Make Nextcloud see the files:
 
    ```bash
-   kubectl exec -n nextcloud deploy/nextcloud -c nextcloud -- occ maintenance:mode --on
-   kubectl exec -n nextcloud deploy/nextcloud -c nextcloud -- occ files:scan --all
-   kubectl exec -n nextcloud deploy/nextcloud -c nextcloud -- occ maintenance:mode --off
+   kubectl exec -n nextcloud deploy/nextcloud -c nextcloud -- php occ maintenance:mode --off
+   kubectl exec -n nextcloud deploy/nextcloud -c nextcloud -- php occ files:scan --all
    ```
+
+   Maintenance mode unloads app commands (`files:scan` comes from the files
+   app), so the scan runs after `--off` — never while the site is locked.
 
    The job runs as uid 33 (www-data) and writes straight into
    `<PVC>/data/<user>/files`, so no `chown` is needed.
@@ -497,7 +506,7 @@ the `readonly` mount option applied below.
    (storage **and** auth) go via `--config`, so nothing is prompted:
 
 ```bash
-kubectl exec -n nextcloud deploy/nextcloud -c nextcloud -- occ files_external:create \
+kubectl exec -n nextcloud deploy/nextcloud -c nextcloud -- php occ files_external:create \
   "RAW Archive" dav password::password \
   --config host=uXXXXX.your-storagebox.de \
   --config root=/raw-archive \
@@ -505,7 +514,7 @@ kubectl exec -n nextcloud deploy/nextcloud -c nextcloud -- occ files_external:cr
   --config user=uXXXXX \
   --config password='<storage box password>'
 # then lock it down (id comes from the create output):
-kubectl exec -n nextcloud deploy/nextcloud -c nextcloud -- occ files_external:option \
+kubectl exec -n nextcloud deploy/nextcloud -c nextcloud -- php occ files_external:option \
   <id-from-create-output> readonly true
 ```
 
@@ -558,7 +567,7 @@ kubectl exec -i -n nextcloud deploy/nextcloud-mariadb -- \
   sh -c 'mariadb -uroot -p"$(cat $MARIADB_ROOT_PASSWORD)" nextcloud' < dump.sql
 # 5. Restart and verify:
 kubectl scale -n nextcloud deploy nextcloud --replicas=1
-kubectl exec -n nextcloud deploy/nextcloud -c nextcloud -- occ status
+kubectl exec -n nextcloud deploy/nextcloud -c nextcloud -- php occ status
 curl -I https://cloud.victorklomp.nl/status.php
 ```
 

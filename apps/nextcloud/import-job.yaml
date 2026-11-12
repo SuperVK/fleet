@@ -38,7 +38,7 @@ spec:
           args:
             - |
               set -e
-              rclone copy onedrive:Photography "/data/data/victor@vtkl.nl/files/Photography" \
+              rclone copy "onedrive:Photography/2. Export" "/data/data/victor@vtkl.nl/files/Photography" \
                 --include "*.{jpg,jpeg,png,heic,heif,webp}" \
                 --transfers 4 --checkers 8 --tpslimit 8 \
                 --retries 5 --retries-sleep 30s \
