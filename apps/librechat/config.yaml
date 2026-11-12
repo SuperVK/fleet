@@ -2,6 +2,8 @@
 # mounted read-only at /app/librechat.yaml — the image's default config path,
 # so no CONFIG_PATH override is needed. LibreChat interpolates ${VARS} from
 # the pod env at startup (OPENROUTER_KEY comes from the SOPS secret).
+# OpenRouter is the only LLM endpoint: the built-in OpenAI/Anthropic/Google
+# ones are disabled by leaving their env keys unset (deployment.yaml).
 #
 # subPath file mounts never pick up ConfigMap changes — after editing:
 #   kubectl -n librechat rollout restart deploy/librechat
@@ -29,3 +31,7 @@ data:
           addParams:
             reasoning:
               effort: "low"
+    webSearch:
+      searchProvider: keenable
+      scraperProvider: keenable
+      rerankerType: none

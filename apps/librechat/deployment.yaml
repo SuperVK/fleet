@@ -111,20 +111,12 @@ spec:
                   name: librechat
                   key: creds-iv
             # ---- LLM endpoints ----
-            # "user_provided" = no admin-managed key; every signed-in user
-            # pastes their own API key in Settings. Replace the value with a
-            # real key in the SOPS secret (same key names) to make keys
-            # admin-managed instead.
-            - name: OPENAI_API_KEY
-              value: user_provided
-            - name: ANTHROPIC_API_KEY
-              value: user_provided
-            - name: GOOGLE_KEY
-              value: user_provided
-            # OpenRouter is admin-managed: librechat.yaml (ConfigMap) sets
-            # apiKey: "${OPENROUTER_KEY}" for its custom endpoint, and this
-            # env var fills that in from the SOPS secret. The OpenAI/
-            # Anthropic/Google endpoints above stay user_provided.
+            # Single endpoint: OpenRouter, admin-managed — librechat.yaml
+            # (ConfigMap) sets apiKey: "${OPENROUTER_KEY}" for its custom
+            # endpoint and this env var fills it from the SOPS secret.
+            # The built-in OpenAI/Anthropic/Google endpoints are disabled by
+            # leaving OPENAI_API_KEY / ANTHROPIC_API_KEY / GOOGLE_KEY unset
+            # (upstream docs: blank key = endpoint hidden from the menu).
             - name: OPENROUTER_KEY
               valueFrom:
                 secretKeyRef:

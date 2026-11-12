@@ -349,15 +349,13 @@ SOPS_AGE_KEY_FILE=age.agekey sops edit apps/librechat/secrets.sops.yaml
 # 4. Open https://chat.victorklomp.nl → "Continue with Pocket ID" → passkey.
 ```
 
-LLM keys: the OpenAI / Anthropic / Google endpoints ship as `user_provided`
-in `apps/librechat/deployment.yaml` — each user pastes their own API key in
-Settings → Data controls / endpoints. For admin-managed keys instead, put the
-key in the SOPS secret (e.g. `openai-api-key: sk-...`) and switch the env var
-to a `secretKeyRef`. OpenRouter already works that way:
-`apps/librechat/config.yaml` (ConfigMap, mounted as `/app/librechat.yaml`)
-defines the custom OpenRouter endpoint with `apiKey: "${OPENROUTER_KEY}"`,
-filled from the SOPS secret's `openrouter-key`; subPath mounts don't hot-reload,
-so `kubectl -n librechat rollout restart deploy/librechat` after a key/config
+LLM endpoints: OpenRouter only — `apps/librechat/config.yaml` (ConfigMap,
+mounted as `/app/librechat.yaml`) defines it with `apiKey: "${OPENROUTER_KEY}"`
+(filled from the SOPS secret's `openrouter-key`) and `z-ai/glm-5.3-flash` as
+the default model. The built-in OpenAI/Anthropic/Google endpoints are disabled
+by leaving their env keys unset in `apps/librechat/deployment.yaml` (upstream:
+blank key = endpoint hidden). subPath mounts don't hot-reload, so
+`kubectl -n librechat rollout restart deploy/librechat` after a key/config
 change. Message search (Meilisearch) and file RAG (pgvector +
 rag_api) are intentionally not deployed — lean personal instance; both are
 optional upstream services.
@@ -641,7 +639,7 @@ LibreChat (image v0.8.8, plain Kustomize manifests — no chart):
 - **Bundled MongoDB 8.0.20, `--noauth` like upstream's compose, ClusterIP only** — same trust level as Nextcloud's Redis cache: nothing outside the cluster can reach it. Auth was skipped deliberately: the upstream compose ships noauth, and a root user + authSource wiring buys little on a single-node, non-exposed instance.
 - **`CREDS_KEY`/`CREDS_IV` lengths verified in source** (`packages/data-schemas/src/crypto/index.ts`): both are hex-decoded into an AES-CBC key/IV — 32 bytes key = 64 hex chars, 16 bytes IV = 32 hex chars; JWT/CREDS/session secrets are all generated at install time in the SOPS secret (upstream would otherwise persist throwaway temp credentials in `/app/data/.env.temp`).
 - **OIDC with Pocket ID** — LibreChat's OpenID strategy is a generic OIDC issuer client (`OPENID_ISSUER` points at `sso.victorklomp.nl`); password login + registration disabled; first OIDC login auto-creates the account and the **first user becomes ADMIN** (verified `AuthService.js`). `OPENID_CALLBACK_URL=/oauth/openid/callback` (the upstream default, must match the Pocket ID client's registered callback).
-- **Endpoints left on `user_provided`** — OpenAI/Anthropic/Google env values are the literal `user_provided` (upstream's own example default): every signed-in user pastes their key in the UI; no secrets needed in git. Real admin-managed keys swap the env for a secretKeyRef.
+- **OpenRouter as the only LLM endpoint** — a custom endpoint in `apps/librechat/config.yaml` (ConfigMap → `/app/librechat.yaml`, upstream's default config path) with `apiKey: "${OPENROUTER_KEY}"` filled from the SOPS secret; GLM 5.3 Flash is the default model. The built-in OpenAI/Anthropic/Google endpoints are disabled by leaving their env keys unset (upstream: blank key = endpoint hidden — there is no `disable:` option for built-ins in librechat.yaml).
 - **One PVC, three mounts** — upstream's compose binds `/app/data`, `/app/uploads`, `/app/client/public/images`; the same volume is mounted at all three paths (separate subdirectories, no overlap) so uploads/generated images survive pod replacement.
 - **Probes:** liveness `GET /` (the SPA proves the process serves), readiness `GET /api/config` (public route, app config) — the image ships no healthcheck and there is no dedicated `/api/health`.
 - **Meilisearch (message search) and the RAG stack (pgvector + rag_api) not deployed** — optional upstream services, off for a lean personal instance (`SEARCH=false` is the app default).
